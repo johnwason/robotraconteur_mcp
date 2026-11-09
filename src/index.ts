@@ -95,18 +95,6 @@ export function createServer(tools: BridgeTools): McpServer
         inputSchema: z.object({ service, object, name: name("wire"), value: z.unknown().describe("The value, in JSON") })
     }, ({ service: s, object: o, name: n, value }) => respond(() => tools.writeWire(s, o, n, value)));
 
-    server.registerTool("rr_sample_wire", {
-        description: "Watch a wire for a short time to see how its value changes. Returns evenly spaced samples.",
-        inputSchema: z.object({
-            service,
-            object,
-            name: name("wire"),
-            duration_s: z.number().positive().max(10).optional().describe("How long to watch. The default is 1 second, and the maximum is 10"),
-            max_samples: z.number().int().positive().max(100).optional().describe("The most samples to return. The default is 20")
-        }),
-        annotations: { readOnlyHint: true }
-    }, (a) => respond(() => tools.sampleWire(a.service, a.object, a.name, a.duration_s ?? 1, a.max_samples ?? 20)));
-
     server.registerTool("rr_read_events", {
         description: "Return events a service has sent, such as a chat message arriving. Events are only collected after a service has first been used, so call this once to begin.",
         inputSchema: z.object({

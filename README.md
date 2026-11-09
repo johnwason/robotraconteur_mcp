@@ -15,7 +15,6 @@ The server, and every service it talks to, runs only inside an isolated podman c
 | `rr_get_property`, `rr_set_property` | Read and write properties |
 | `rr_call_function` | Call a function. Generators run to completion |
 | `rr_read_wire`, `rr_write_wire` | Get or set the latest value of a wire |
-| `rr_sample_wire` | Watch a wire for a few seconds |
 | `rr_read_events` | Return events the service has sent |
 | `rr_robot_move_joints` | Move a standard robot smoothly to joint positions |
 

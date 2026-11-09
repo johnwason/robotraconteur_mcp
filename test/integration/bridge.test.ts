@@ -140,7 +140,7 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("offers a fixed list of tools", async () =>
     {
         const { tools } = await bridge.listTools();
-        assert.deepEqual(tools.map((t) => t.name), ["rr_discover", "rr_describe", "rr_get_property", "rr_set_property", "rr_call_function", "rr_read_wire", "rr_write_wire", "rr_sample_wire", "rr_read_events", "rr_robot_move_joints"]);
+        assert.deepEqual(tools.map((t) => t.name), ["rr_discover", "rr_describe", "rr_get_property", "rr_set_property", "rr_call_function", "rr_read_wire", "rr_write_wire", "rr_read_events", "rr_robot_move_joints"]);
         for (const t of tools) assert.ok((t.description?.length ?? 0) > 20, t.name);
     });
 
@@ -334,13 +334,6 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         await ok(bridge, "rr_set_property", { service, name: "command_mode", value: "trajectory" });
         const trajectory = { joint_names: [`joint_1`, "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"], waypoints: [{ joint_position: [0, 0, 0, 0, 0, 0] }] };
         await fails(bridge, "rr_call_function", { service, name: "execute_trajectory", arguments: [trajectory] }, /five or more waypoints/);
-    });
-
-    test("watches a wire", async () =>
-    {
-        const r = await ok(bridge, "rr_sample_wire", { service: "robot_a.robot", name: "robot_state", duration_s: 0.5, max_samples: 5 });
-        assert.ok(r.count > 5, String(r.count));
-        assert.ok(r.samples.length <= 5 && r.samples.length > 0);
     });
 
     test("reads every part of Core's test service", async () =>

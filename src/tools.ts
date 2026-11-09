@@ -196,30 +196,6 @@ export class BridgeTools
         return { ok: true };
     }
 
-    async sampleWire(service: string, object: string | undefined, name: string, duration_s: number, max_samples: number): Promise<Record<string, unknown>>
-    {
-        const stub = await this.registry.resolve(service, object);
-        const m = member(stub, name, ["wire"]);
-        const received: { value: unknown; timestamp: { seconds: bigint; nanoseconds: number } }[] = [];
-        const wire = await stub.connectWire(name);
-        const listener = (_: unknown, value: unknown, timestamp: { seconds: bigint; nanoseconds: number }) =>
-        {
-            received.push({ value, timestamp });
-            if (received.length > 100000) received.shift();
-        };
-        stub.addWireValueChangedListener(wire, listener);
-        await sleep(duration_s * 1000);
-        stub.removeWireValueChangedListener(wire, listener);
-        await stub.closeWire(wire);
-
-        const step = Math.max(1, Math.ceil(received.length / max_samples));
-        return {
-            count: received.length,
-            duration_s,
-            samples: received.filter((_, i) => i % step === 0).map((s) => ({ value: encode(stub, s.value, m.type), timestamp: this.timestamp(s.timestamp) }))
-        };
-    }
-
     readEvents(service: string, clear: boolean, limit: number): Record<string, unknown>
     {
         return { ...this.registry.takeEvents(service, clear, limit) };

@@ -29,7 +29,7 @@ The file `.mcp.json` in this folder registers the server as `robotraconteur`. It
 
 1. Start a new session here: run `claude` in `robotraconteur_mcp`, or open this folder in VS Code and start a new Claude Code conversation.
 2. Approve the `robotraconteur` server when asked.
-3. Run `/mcp`. The server should be connected, with 10 tools.
+3. Run `/mcp`. The server should be connected, with 9 tools.
 
 Claude Code asks permission for each tool the first time it is used. Allow them as they come up, so that you can see each call the model makes.
 
