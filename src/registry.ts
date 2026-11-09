@@ -59,6 +59,10 @@ const MIN_POLL_SPACING_MS = 1000;
 export interface ConnectedService
 {
     subscription: ServiceSubscription;
+    /** The addresses being used, which change if a service restarts on another port */
+    urls: string[];
+    /** Why the most recent connection attempt failed, if it did */
+    lastError?: unknown;
     events: ReceivedEvent[];
     droppedEvents: number;
 }
@@ -138,8 +142,10 @@ export class ServiceRegistry
     private notResponding(name: string): string
     {
         const configured = this.config.services?.find((s) => s.name === name);
-        if (configured) return `Service "${name}" is not responding. Check that it is running at ${configured.url}.`;
-        if (this.named().has(name)) return `Service "${name}" is not responding. It is still announced on the network, so it may be starting or busy. Try again shortly.`;
+        const failure = this.connected.get(name)?.lastError;
+        const reason = failure === undefined ? "" : failure instanceof RobotRaconteurError ? ` The last attempt failed with ${failure.errorName}: ${failure.message}.` : ` The last attempt failed with: ${String(failure)}.`;
+        if (configured) return `Service "${name}" is not responding. Check that it is running at ${configured.url}.${reason}`;
+        if (this.named().has(name)) return `Service "${name}" is announced on the network but could not be connected to.${reason || " It may be starting or busy. Try again shortly."}`;
         return `Service "${name}" is not responding and is no longer announced on the network, so it has probably stopped. Use rr_discover to see what is available.`;
     }
 
@@ -228,10 +234,27 @@ export class ServiceRegistry
     {
         const name = this.fullName(given_name);
         let service = this.connected.get(name);
-        if (service) return service;
+        if (service)
+        {
+            const urls = this.named().get(name)?.connectionURLs;
+            if (urls && [...urls].sort().join() !== [...service.urls].sort().join())
+            {
+                service.urls = urls;
+                service.subscription.updateServiceURL(urls);
+            }
+            return service;
+        }
         const c = this.connectionFor(name);
-        const created: ConnectedService = { subscription: subscribeService(this.node, c.urls, c.username, c.credentials), events: [], droppedEvents: 0 };
-        created.subscription.addClientConnectListener((_, __, client) => this.attachEvents(created, client));
+        const created: ConnectedService = { subscription: subscribeService(this.node, c.urls, c.username, c.credentials), urls: c.urls, events: [], droppedEvents: 0 };
+        created.subscription.addClientConnectListener((_, __, client) =>
+        {
+            created.lastError = undefined;
+            this.attachEvents(created, client);
+        });
+        created.subscription.addClientConnectFailedListener((_, __, ___, error) =>
+        {
+            created.lastError = error;
+        });
         this.connected.set(name, created);
         service = created;
         return service;
@@ -247,7 +270,8 @@ export class ServiceRegistry
             throw e;
         });
         let o = root;
-        for (const part of object ? object.split(".") : [])
+        // A dot inside an index is part of the index
+        for (const part of object ? object.split(/\.(?![^[]*\])/) : [])
         {
             const m = /^([A-Za-z_]\w*)(?:\[(.*)\])?$/.exec(part);
             if (!m) throw new Error(`Invalid object path "${object}". Use names such as arm or tool[0], separated by dots`);

@@ -198,11 +198,78 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
             assert.ok(!names.includes("robot_c.robot"), "the stopped robot should leave the list");
             assert.ok(names.includes("robot_a.robot") && names.includes("robot_b.robot"), names.join(", "));
             await fails(fresh, "rr_describe", { service: "robot_c.robot" }, /no longer announced on the network/);
+
+            // Back on a different port, it is found under the same name and connects again
+            start("python3", ["test/services/loopback_robot.py", "--nodename", "robot_c", "--port", "52713"]);
+            await waitForPort(52713);
+            await discover(fresh, ["robot_c.robot"]);
+            const reconnect_by = Date.now() + 30000;
+            let result = await call(fresh, "rr_describe", { service: "robot_c.robot" });
+            while (result.isError && Date.now() < reconnect_by) result = await call(fresh, "rr_describe", { service: "robot_c.robot" });
+            assert.ok(!result.isError, result.content[0]?.text);
         }
         finally
         {
             await fresh.close();
         }
+    });
+
+    test("Reynard rejects values that are not finite", async () =>
+    {
+        await fails(bridge, "rr_call_function", { service: "reynard", name: "teleport", arguments: ["NaN", 0] }, /finite/);
+        await fails(bridge, "rr_set_property", { service: "reynard", name: "color", value: ["NaN", 0, 0] }, /finite/);
+    });
+
+    test("a robot reports its status and can be halted", async () =>
+    {
+        const service = "robot_a.robot";
+        assert.equal((await ok(bridge, "rr_get_property", { service, name: "operational_mode" })).value.name, "cobot");
+        assert.equal((await ok(bridge, "rr_get_property", { service, name: "controller_state" })).value.name, "motor_on");
+        assert.deepEqual((await ok(bridge, "rr_get_property", { service, name: "current_errors" })).value, []);
+        await ok(bridge, "rr_set_property", { service, name: "command_mode", value: "halt" });
+        await ok(bridge, "rr_call_function", { service, name: "halt" });
+        await fails(bridge, "rr_call_function", { service, name: "home" }, /does not support homing/);
+    });
+
+    test("a service that needs credentials says so", async () =>
+    {
+        await fails(bridge, "rr_describe", { service: "RobotRaconteurTestService_auth" }, /AuthenticationError/);
+    });
+
+    test("the wrong tool for a member is explained", async () =>
+    {
+        const service = "robot_a.robot";
+        await fails(bridge, "rr_get_property", { service, name: "robot_state" }, /is a wire, not a property\. Use rr_read_wire or rr_write_wire/);
+        await fails(bridge, "rr_read_wire", { service, name: "tool_changed" }, /is an event, not a wire\. Use rr_read_events/);
+        await fails(bridge, "rr_read_wire", { service, name: "robot_state_sensor_data" }, /is a pipe, not a wire\. There is no tool for using a pipe/);
+    });
+
+    test("a second motion cannot interrupt one that is running", async () =>
+    {
+        const service = "robot_a.robot";
+        const first = ok(bridge, "rr_robot_move_joints", { service, joint_position: [0.1, 0, 0, 0, 0, 0], duration_s: 2 });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await fails(bridge, "rr_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 }, /already moving/);
+        assert.equal((await first).completed, true);
+        await ok(bridge, "rr_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+    });
+
+    test("a very long motion is refused rather than exhausting memory", async () =>
+    {
+        await fails(bridge, "rr_robot_move_joints", { service: "robot_a.robot", joint_position: [0, 0, 0, 0, 0, 0], duration_s: 100000 }, /duration_s/);
+        await ok(bridge, "rr_discover");
+    });
+
+    test("a member that can hold any object can be described", async () =>
+    {
+        await ok(bridge, "rr_describe", { service: TEST_SERVICE, member: "o6" });
+    });
+
+    test("a generator that needs inputs is checked before it starts", async () =>
+    {
+        const service = "RobotRaconteurTestService2";
+        await fails(bridge, "rr_call_function", { service, name: "gen_func4" }, /Give them in generator_inputs/);
+        await fails(bridge, "rr_call_function", { service, name: "gen_func4", generator_inputs: ["x"] }, /generator_inputs\[0\]/);
     });
 
     test("a configured service that cannot be reached is explained", async () =>
@@ -285,9 +352,8 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         await ok(bridge, "rr_call_function", { service: "reynard", name: "teleport", arguments: [0.1, -0.2] });
         await new Promise((resolve) => setTimeout(resolve, 300));
         const { value } = await ok(bridge, "rr_read_wire", { service: "reynard", name: "state" });
-        // Reynard reports millimeters
-        assert.ok(Math.abs(value.robot_position[0] - 100) < 1e-3, JSON.stringify(value.robot_position));
-        assert.ok(Math.abs(value.robot_position[1] + 200) < 1e-3);
+        assert.ok(Math.abs(value.robot_position[0] - 0.1) < 1e-6, JSON.stringify(value.robot_position));
+        assert.ok(Math.abs(value.robot_position[1] + 0.2) < 1e-6);
 
         await ok(bridge, "rr_call_function", { service: "reynard", name: "say", arguments: { message: "Hello from MCP" } });
         await ok(bridge, "rr_set_property", { service: "reynard", name: "color", value: [1, 0, 0] });

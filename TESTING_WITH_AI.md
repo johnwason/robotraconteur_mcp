@@ -13,6 +13,8 @@ You need podman, and these folders side by side:
 | `robotraconteur_typescript` | `node-split` |
 | `robotraconteur_typescript_node` | `dev` |
 | `robotraconteur_mcp` | `dev` |
+| `robotraconteur_abstract_robot_python` | with local fixes |
+| `reynard-the-robot` | with local fixes |
 
 Both sibling packages must already be built, so that each has a `dist` folder. The image `localhost/rr-ts-dev-cpp` must exist. Then, in `robotraconteur_mcp`:
 
@@ -40,7 +42,7 @@ Start with the first prompt. It keeps the model from learning the devices by rea
 | # | Prompt | What should happen |
 | --- | --- | --- |
 | 1 | Use only the robotraconteur MCP tools, not the files in this folder. What devices can you find on the network, and what can each one do? | It finds `experimental.reynard_the_robot.reynard`, `left_arm.robot`, and `right_arm.robot`, and describes them. A first call can come back empty with `searching: true`. It should call again, and all three appear within about 15 seconds. |
-| 2 | Teleport Reynard to x = 100 mm, y = -200 mm, then confirm where it ended up. | It calls `teleport(0.1, -0.2)`, because `teleport` takes meters, then confirms with the `robot_position` property, `[0.1, -0.2]`. The `state` wire reports `[100, -200]` because of a known Reynard bug: that wire is in millimeters and degrees, and everything else is in meters and radians. |
+| 2 | Teleport Reynard to x = 100 mm, y = -200 mm, then confirm where it ended up. | It calls `teleport(0.1, -0.2)`, because `teleport` takes meters, then confirms with `robot_position` or the `state` wire, either of which reads `[0.1, -0.2]`. |
 | 3 | What color is Reynard? Change it to orange and confirm. | It reads `color`, which starts at about `[0.93, 0.49, 0.19]`, writes a new RGB value, and reads it back. |
 | 4 | Which robot is at the lab site? Move it to joint positions 0.3, -0.2, 0.4, 0, 0.5, 0 radians over 2 seconds and report where it stopped. | It picks `left_arm.robot` from the `site` attribute, and calls `rr_robot_move_joints`. The call takes a few seconds longer than the motion. The final position should match the target to about 9 decimal places. |
 | 5 | Read where the left arm is, then move the right arm to the mirror image of it over 2 seconds. | It reads `robot_state`, negates the joints, moves `right_arm.robot`, and confirms. |
@@ -51,7 +53,7 @@ Whether the model can work out what to do is the point of this test, more than w
 
 - Does it use `rr_describe` before acting, or guess at names?
 - Does it call `rr_discover` again when `searching` is true, or conclude that nothing is there?
-- If it reads Reynard's `state` wire, does it notice that the values are in different units from the commands?
+- The service definition gives no units. Does it work out that `teleport` takes meters, or ask?
 - When a call fails, does the error message tell it enough to fix the call?
 - Which tools did it ignore or misuse? Their descriptions are in `src/index.ts`.
 
@@ -61,7 +63,6 @@ Whether the model can work out what to do is the point of this test, more than w
 - **You can't watch Reynard move.** Its web page is inside the isolated container, and no port is published. Check results through the tool calls.
 - **Events can't be shown with Reynard.** `new_message` only fires for messages typed into that web page, and `say` does not fire it.
 - **Other devices are out of reach.** A simulator or robot on another machine can't be found from the internal network.
-- **Very large values are slow.** A 10.5 MB array took about 47 seconds to read in testing. The cause is not yet known.
 
 ## Troubleshooting
 

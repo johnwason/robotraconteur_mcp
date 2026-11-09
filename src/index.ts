@@ -36,7 +36,7 @@ async function respond(run: () => Promise<Result> | Result)
     }
     catch (e)
     {
-        const text = e instanceof RobotRaconteurError ? `${e.errorName}: ${e.message}.${hintFor(e)}` : (e as Error).message;
+        const text = e instanceof RobotRaconteurError ? `${e.errorName}${e.message ? `: ${e.message.replace(/\.$/, "")}` : ""}.${hintFor(e)}` : (e as Error).message;
         return { isError: true, content: [{ type: "text" as const, text }] };
     }
 }
@@ -110,7 +110,7 @@ export function createServer(tools: BridgeTools): McpServer
             service,
             object,
             joint_position: z.array(z.number()).describe("The target position of every joint, in order"),
-            duration_s: z.number().positive().describe("How long the motion should take, in seconds")
+            duration_s: z.number().positive().max(100).describe("How long the motion should take, in seconds. The maximum is 100")
         })
     }, (a) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s)));
 

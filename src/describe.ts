@@ -47,7 +47,7 @@ function memberSummary(m: MemberDefinition): Record<string, unknown>
 /** Describes a named type and every type it uses, in the form the tools accept */
 function collectTypes(t: TypeDefinition, scope: ServiceDefinition, types: TypeContext, out: Map<string, unknown>): void
 {
-    if (out.size >= MAX_TYPES || t.type === "void" || t.type === "string" || t.type === "varvalue" || primitivesByName.has(t.type)) return;
+    if (out.size >= MAX_TYPES || t.type === "void" || t.type === "string" || t.type === "varvalue" || t.type === "varobject" || primitivesByName.has(t.type)) return;
     const r = types.resolve(t.type, scope);
     if (out.has(r.qualifiedName)) return;
     if (r.kind === "enum")

@@ -26,11 +26,24 @@ const COMMAND_MODE_HALT = 0;
 const COMMAND_MODE_TRAJECTORY = 2;
 const WAYPOINT_SPACING_S = 0.05;
 
+const TOOL_FOR_KIND: Record<string, string> = {
+    property: "Use rr_get_property or rr_set_property.",
+    function: "Use rr_call_function.",
+    wire: "Use rr_read_wire or rr_write_wire.",
+    event: "Use rr_read_events.",
+    objref: "Select it with the object argument."
+};
+
+function withArticle(kind: string): string
+{
+    return `${/^[aeo]/.test(kind) ? "an" : "a"} ${kind}`;
+}
+
 function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinition
 {
     const m = stub.context.findMember(stub.objectType, name);
     if (m && kinds.includes(m.kind)) return m;
-    if (m) throw new Error(`"${name}" is a ${m.kind}, not a ${kinds.join(" or ")}. Use the tool for a ${m.kind}.`);
+    if (m) throw new Error(`"${name}" is ${withArticle(m.kind)}, not ${withArticle(kinds.join(" or "))}. ${TOOL_FOR_KIND[m.kind] ?? `There is no tool for using ${withArticle(m.kind)}.`}`);
     throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use rr_describe to list its members.`);
 }
 
@@ -56,6 +69,8 @@ function sleep(ms: number): Promise<void>
 /** What the tools do, separate from the MCP protocol so that it can be tested directly */
 export class BridgeTools
 {
+    private moving = new Set<string>();
+
     constructor(private registry: ServiceRegistry) {}
 
     /** Report what is known now. Searching happens in the background and never delays the answer */
@@ -126,6 +141,16 @@ export class BridgeTools
         });
     }
 
+    private convertGeneratorInputs(stub: ServiceStub, m: MemberDefinition, inputs: unknown[] | undefined): unknown[] | undefined
+    {
+        const parameter = m.parameters?.find((p) => p.type.container === "generator");
+        if (!parameter) return undefined;
+        if (!inputs) throw new Error(`${m.name} takes a stream of values for ${parameter.name}. Give them in generator_inputs`);
+        const { container: _, ...item } = parameter.type;
+        const codec = new Codec(stub.context.types);
+        return inputs.map((v, i) => codec.fromJson(v, item, scope(stub), `generator_inputs[${i}]`));
+    }
+
     private async runGenerator(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number): Promise<Record<string, unknown>>
     {
         const codec = new Codec(stub.context.types);
@@ -145,7 +170,7 @@ export class BridgeTools
                 await stub.callFunctionGenClose(handle);
                 return { completed: true, count, results };
             }
-            const param = handle.paramType ? codec.fromJson(inputs?.[i], handle.paramType, scope(stub), `generator_inputs[${i}]`) : undefined;
+            const param = handle.paramType ? inputs?.[i] : undefined;
             i++;
             try
             {
@@ -169,9 +194,12 @@ export class BridgeTools
     {
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["function"]);
-        const result = await stub.callFunction(name, this.convertArguments(stub, m, args));
+        const converted = this.convertArguments(stub, m, args);
+        // Checked before the call, because a generator that has started must be closed
+        const inputs = this.convertGeneratorInputs(stub, m, generator_inputs);
+        const result = await stub.callFunction(name, converted);
         const generator = m.type?.container === "generator" || m.parameters?.some((p) => p.type.container === "generator");
-        if (generator) return this.runGenerator(stub, result as GeneratorHandle, generator_inputs, timeout_s);
+        if (generator) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s);
         return { result: m.type?.type === "void" ? null : encode(stub, result, m.type) };
     }
 
@@ -203,6 +231,22 @@ export class BridgeTools
 
     /** Move a standard robot to joint positions, building a trajectory that meets the driver's rules */
     async robotMoveJoints(service: string, object: string | undefined, target: number[], duration_s: number): Promise<Record<string, unknown>>
+    {
+        // Starting a motion selects the command mode, which would stop one already running
+        const key = `${service}/${object ?? ""}`;
+        if (this.moving.has(key)) throw new Error(`${service} is already moving. Wait for that motion to finish before starting another.`);
+        this.moving.add(key);
+        try
+        {
+            return await this.moveJoints(service, object, target, duration_s);
+        }
+        finally
+        {
+            this.moving.delete(key);
+        }
+    }
+
+    private async moveJoints(service: string, object: string | undefined, target: number[], duration_s: number): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
         member(stub, "execute_trajectory", ["function"]);
