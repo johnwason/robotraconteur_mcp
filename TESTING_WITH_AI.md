@@ -13,8 +13,6 @@ You need podman, and these folders side by side:
 | `robotraconteur_typescript` | `node-split` |
 | `robotraconteur_typescript_node` | `dev` |
 | `robotraconteur_mcp` | `dev` |
-| `robotraconteur_abstract_robot_python` | with local fixes |
-| `reynard-the-robot` | with local fixes |
 
 Both sibling packages must already be built, so that each has a `dist` folder. The image `localhost/rr-ts-dev-cpp` must exist. Then, in `robotraconteur_mcp`:
 

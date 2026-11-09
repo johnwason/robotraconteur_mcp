@@ -30,7 +30,7 @@ It can also list services at known addresses with `"services": [{ "name": "ur5e"
 
 ## Building and testing
 
-Build the images and packages of `robotraconteur_typescript` (branch `node-split`) and `robotraconteur_typescript_node` first, in folders next to this one. The tests and demo also use `robotraconteur_abstract_robot_python` and `reynard-the-robot` from folders next to this one, in place of the released packages, which still have bugs that these tests check. Then:
+Build the images and packages of `robotraconteur_typescript` (branch `node-split`) and `robotraconteur_typescript_node` first, in folders next to this one. Then:
 
 ```sh
 podman build -t rr-ts-mcp-dev .

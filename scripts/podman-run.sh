@@ -17,10 +17,6 @@ podman run --rm -i --network="$network" --memory=4g \
     -v /work/robotraconteur_mcp/node_modules \
     -v "$root/robotraconteur_typescript:/work/robotraconteur_typescript:ro,Z" \
     -v "$root/robotraconteur_typescript_node:/work/robotraconteur_typescript_node:ro,Z" \
-    -v "$root/robotraconteur_abstract_robot_python:/work/robotraconteur_abstract_robot_python:ro,Z" \
-    -v "$root/reynard-the-robot:/work/reynard-the-robot:ro,Z" \
-    -e PYTHONPATH=/work/robotraconteur_abstract_robot_python/src:/work/reynard-the-robot/src \
-    -e PYTHONDONTWRITEBYTECODE=1 \
     -w /work/robotraconteur_mcp rr-ts-mcp-dev "$@" <&3 3<&- &
 pid=$!
 exec 3<&-
