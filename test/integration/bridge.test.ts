@@ -108,7 +108,7 @@ async function discover(client: Client, wanted: string[]): Promise<any[]>
     {
         const { services } = await ok(client, "rr_discover");
         const names = services.map((s: { service: string }) => s.service);
-        if (wanted.every((w) => names.includes(w))) return services;
+        if (wanted.every((w) => names.some((n: string) => n === w || n.endsWith("." + w)))) return services;
         if (Date.now() > deadline) throw new Error("Not found: " + wanted.join(", ") + " in " + names.join(", "));
         await new Promise((resolve) => setTimeout(resolve, 250));
     }
@@ -147,12 +147,76 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("finds services and gives them usable names", async () =>
     {
         const services = await discover(bridge, ["reynard", "robot_a.robot"]);
-        const reynard = services.find((s) => s.service === "reynard");
+        const reynard = services.find((s) => s.service === "experimental.reynard_the_robot.reynard");
         assert.equal(reynard.type, "experimental.reynard_the_robot.Reynard");
         const a = services.find((s) => s.service === "robot_a.robot");
         assert.equal(a.type, ROBOT_TYPE);
         assert.equal(a.node, "robot_a");
         assert.equal(a.attributes.site, "lab");
+    });
+
+    test("a name does not depend on which other services are present", async () =>
+    {
+        const only_a = await startBridge({ nodeNames: ["robot_a"] });
+        try
+        {
+            const services = await discover(only_a, ["robot_a.robot"]);
+            assert.deepEqual(services.map((s) => s.service), ["robot_a.robot"]);
+            // With nothing else to confuse it with, the service name alone is enough
+            await ok(only_a, "rr_describe", { service: "robot" });
+        }
+        finally
+        {
+            await only_a.close();
+        }
+    });
+
+    test("a service name shared by several nodes is rejected, listing them", async () =>
+    {
+        await fails(bridge, "rr_describe", { service: "robot" }, /"robot" matches more than one service: robot_a\.robot, robot_b\.robot/);
+    });
+
+    test("a service that goes away keeps its name and is explained", { timeout: 150000 }, async () =>
+    {
+        const robot_c = start("python3", ["test/services/loopback_robot.py", "--nodename", "robot_c", "--port", "52703"]);
+        await waitForPort(52703);
+        const fresh = await startBridge();
+        try
+        {
+            await discover(fresh, ["robot_a.robot", "robot_b.robot", "robot_c.robot"]);
+            await ok(fresh, "rr_describe", { service: "robot_c.robot" });
+            robot_c.kill("SIGKILL");
+
+            const deadline = Date.now() + 100000;
+            let names: string[] = [];
+            do
+            {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                names = (await ok(fresh, "rr_discover")).services.map((s: { service: string }) => s.service);
+            } while (names.includes("robot_c.robot") && Date.now() < deadline);
+
+            assert.ok(!names.includes("robot_c.robot"), "the stopped robot should leave the list");
+            assert.ok(names.includes("robot_a.robot") && names.includes("robot_b.robot"), names.join(", "));
+            await fails(fresh, "rr_describe", { service: "robot_c.robot" }, /no longer announced on the network/);
+        }
+        finally
+        {
+            await fresh.close();
+        }
+    });
+
+    test("a configured service that cannot be reached is explained", async () =>
+    {
+        const url = "rr+tcp://localhost:1/?nodename=gone&service=gone";
+        const fresh = await startBridge({ services: [{ name: "gone", url }] });
+        try
+        {
+            await fails(fresh, "rr_describe", { service: "gone" }, /"gone" is not responding\. Check that it is running at rr\+tcp/);
+        }
+        finally
+        {
+            await fresh.close();
+        }
     });
 
     test("discovery answers immediately and searches in the background", async () =>
@@ -340,8 +404,8 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         const limited = await startBridge({ serviceTypes: [ROBOT_TYPE], nodeNames: ["robot_b"] });
         try
         {
-            const services = await discover(limited, ["robot"]);
-            assert.deepEqual(services.map((s) => s.service), ["robot"]);
+            const services = await discover(limited, ["robot_b.robot"]);
+            assert.deepEqual(services.map((s) => s.service), ["robot_b.robot"]);
             await fails(limited, "rr_get_property", { service: "reynard", name: "color" }, /Unknown service "reynard"/);
         }
         finally

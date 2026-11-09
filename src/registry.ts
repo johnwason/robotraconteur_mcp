@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { readFileSync } from "node:fs";
-import { RobotRaconteurNode, subscribeService } from "robotraconteur";
+import { RobotRaconteurError, RobotRaconteurNode, subscribeService } from "robotraconteur";
 import type { ServiceStub, ServiceSubscription } from "robotraconteur";
 import { IPNodeDiscoveryFlags, NodeDiscovery, TcpTransport } from "robotraconteur-node";
 import type { ServiceInfo2, ServiceInfo2Subscription, ServiceSubscriptionFilter } from "robotraconteur-node";
@@ -71,6 +71,8 @@ export class ServiceRegistry
     private discovery: NodeDiscovery;
     private found: ServiceInfo2Subscription | null = null;
     private connected = new Map<string, ConnectedService>();
+    /** The name given to each service, by node ID and service name. Names never change once given */
+    private names = new Map<string, string>();
     private search_until = 0;
     private last_poll = 0;
     private poll_timer: ReturnType<typeof setTimeout> | undefined;
@@ -100,21 +102,45 @@ export class ServiceRegistry
         await this.node.shutdown();
     }
 
-    /** Short names stay simple where possible: the service name, or node.service if it is shared */
+    /** Every service is named node.service, whatever else is on the network, so that names stay valid */
     private named(): Map<string, ServiceInfo2>
     {
         // Every node has this service. It is how discovery itself finds the others
         const infos = (this.found?.getDetectedServiceInfo2() ?? []).filter((i) => i.name !== "RobotRaconteurServiceIndex");
-        const counts = new Map<string, number>();
-        for (const i of infos) counts.set(i.name, (counts.get(i.name) ?? 0) + 1);
         const out = new Map<string, ServiceInfo2>();
         for (const i of [...infos].sort((a, b) => `${a.nodeName}${a.name}`.localeCompare(`${b.nodeName}${b.name}`)))
         {
-            let name = counts.get(i.name) === 1 ? i.name : `${i.nodeName || "node"}.${i.name}`;
-            if (out.has(name)) name = `${name}.${i.nodeID.toString().slice(1, 9)}`;
+            const key = `${i.nodeID.toString()}/${i.name}`;
+            let name = this.names.get(key);
+            if (!name)
+            {
+                name = `${i.nodeName || "node"}.${i.name}`;
+                // Nodes should have unique names, but nothing enforces it
+                if ([...this.names.values()].includes(name)) name = `${name}.${i.nodeID.toString().slice(1, 9)}`;
+                this.names.set(key, name);
+            }
             out.set(name, i);
         }
         return out;
+    }
+
+    /** Find the full name for a name given by the model, which may be just the service name */
+    private fullName(name: string): string
+    {
+        const named = this.named();
+        if (named.has(name) || this.config.services?.some((s) => s.name === name) || [...this.names.values()].includes(name)) return name;
+        const matches = [...named].filter(([, i]) => i.name === name).map(([n]) => n);
+        if (matches.length > 1) throw new Error(`"${name}" matches more than one service: ${matches.join(", ")}. Use one of those names.`);
+        return matches[0] ?? name;
+    }
+
+    /** Explain a failed connection in terms of what the model can do next */
+    private notResponding(name: string): string
+    {
+        const configured = this.config.services?.find((s) => s.name === name);
+        if (configured) return `Service "${name}" is not responding. Check that it is running at ${configured.url}.`;
+        if (this.named().has(name)) return `Service "${name}" is not responding. It is still announced on the network, so it may be starting or busy. Try again shortly.`;
+        return `Service "${name}" is not responding and is no longer announced on the network, so it has probably stopped. Use rr_discover to see what is available.`;
     }
 
     /** Whether a service that has not appeared yet may still be found by the search in progress */
@@ -166,6 +192,7 @@ export class ServiceRegistry
         const info = this.named().get(name);
         if (!info)
         {
+            if ([...this.names.values()].includes(name)) throw new Error(this.notResponding(name));
             const known = this.list().map((s) => s.service);
             const still = this.searching ? " The search for services is still running, so it may appear shortly." : "";
             throw new Error(`Unknown service "${name}".${still} ${known.length > 0 ? `Known services: ${known.join(", ")}` : "Use rr_discover to find services."}`);
@@ -197,8 +224,9 @@ export class ServiceRegistry
         }
     }
 
-    private connect(name: string): ConnectedService
+    private connect(given_name: string): ConnectedService
     {
+        const name = this.fullName(given_name);
         let service = this.connected.get(name);
         if (service) return service;
         const c = this.connectionFor(name);
@@ -210,9 +238,14 @@ export class ServiceRegistry
     }
 
     /** Get a connected client for a service. An object path such as "arm.tool[0]" selects a sub object */
-    async resolve(name: string, object?: string): Promise<ServiceStub>
+    async resolve(given_name: string, object?: string): Promise<ServiceStub>
     {
-        const root = await this.connect(name).subscription.getDefaultClientWait(CONNECT_TIMEOUT_MS);
+        const name = this.fullName(given_name);
+        const root = await this.connect(name).subscription.getDefaultClientWait(CONNECT_TIMEOUT_MS).catch((e: unknown) =>
+        {
+            if (e instanceof RobotRaconteurError && e.errorName === "RobotRaconteur.ConnectionError") throw new Error(this.notResponding(name));
+            throw e;
+        });
         let o = root;
         for (const part of object ? object.split(".") : [])
         {

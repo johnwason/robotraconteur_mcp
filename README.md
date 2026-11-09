@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets an AI application fin
 
 **This version has no safety layer.** It lets a model move whatever it can reach, so use it only with Reynard the Robot and simulators.
 
-The server, and every service it talks to, runs only inside an isolated podman container, on an internal network with no route to the host or the internet.
+The server, and every service it talks to, runs only inside an isolated podman container, on an internal network of its own with no route to the host or the internet.
 
 ## Tools
 
@@ -19,7 +19,7 @@ The server, and every service it talks to, runs only inside an isolated podman c
 | `rr_read_events` | Return events the service has sent |
 | `rr_robot_move_joints` | Move a standard robot smoothly to joint positions |
 
-Services are named by `rr_discover`, using the service name, or `node.service` when several nodes share a name. Sub objects are selected with paths such as `arm.tool[0]`. Enums can be given by name, and fields left out of a structure are filled with zero or empty values. Discovery runs continuously in the background, and a search can take up to 15 seconds to find a service. `rr_discover` never waits for one. While searching it returns `searching: true` and `check_again_after_s`.
+Services are named by `rr_discover` as `node.service`, and a name stays the same while the server runs. The service name alone also works when only one service has it. If two nodes share a node name, the later one gets part of its node ID added to the name. Sub objects are selected with paths such as `arm.tool[0]`. Enums can be given by name, and fields left out of a structure are filled with zero or empty values. Discovery runs continuously in the background, and a search can take up to 15 seconds to find a service. `rr_discover` never waits for one. While searching it returns `searching: true` and `check_again_after_s`.
 
 An optional JSON file, passed as the first argument, can limit what is used:
 

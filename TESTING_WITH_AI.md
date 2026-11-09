@@ -1,6 +1,6 @@
 # Testing with an AI client
 
-These steps connect an AI client to the MCP server, with Reynard the Robot and two simulated robots for it to find. Everything runs in one isolated podman container with no route to the host or the internet. The container starts when the client connects, and stops when the client disconnects.
+These steps connect an AI client to the MCP server, with Reynard the Robot and two simulated robots for it to find. Everything runs in one isolated podman container, on a network of its own with no route to the host or the internet. The container starts when the client connects, and stops when the client disconnects. Separate sessions get separate containers and can't see each other.
 
 They are written for Claude Code on Linux. For other clients, see [Other clients](#other-clients).
 
@@ -39,8 +39,8 @@ Start with the first prompt. It keeps the model from learning the devices by rea
 
 | # | Prompt | What should happen |
 | --- | --- | --- |
-| 1 | Use only the robotraconteur MCP tools, not the files in this folder. What devices can you find on the network, and what can each one do? | It finds `reynard`, `left_arm.robot`, and `right_arm.robot`, and describes them. A first call can come back empty with `searching: true`. It should call again, and all three appear within about 15 seconds. |
-| 2 | Teleport Reynard to x = 100 mm, y = -200 mm, then confirm where it ended up. | It calls `teleport(0.1, -0.2)`, because `teleport` takes meters, then reads `robot_position` as `[100, -200]` in millimeters from the `state` wire. |
+| 1 | Use only the robotraconteur MCP tools, not the files in this folder. What devices can you find on the network, and what can each one do? | It finds `experimental.reynard_the_robot.reynard`, `left_arm.robot`, and `right_arm.robot`, and describes them. A first call can come back empty with `searching: true`. It should call again, and all three appear within about 15 seconds. |
+| 2 | Teleport Reynard to x = 100 mm, y = -200 mm, then confirm where it ended up. | It calls `teleport(0.1, -0.2)`, because `teleport` takes meters, then confirms with the `robot_position` property, `[0.1, -0.2]`. The `state` wire reports `[100, -200]` because of a known Reynard bug: that wire is in millimeters and degrees, and everything else is in meters and radians. |
 | 3 | What color is Reynard? Change it to orange and confirm. | It reads `color`, which starts at about `[0.93, 0.49, 0.19]`, writes a new RGB value, and reads it back. |
 | 4 | Which robot is at the lab site? Move it to joint positions 0.3, -0.2, 0.4, 0, 0.5, 0 radians over 2 seconds and report where it stopped. | It picks `left_arm.robot` from the `site` attribute, and calls `rr_robot_move_joints`. The call takes a few seconds longer than the motion. The final position should match the target to about 9 decimal places. |
 | 5 | Read where the left arm is, then move the right arm to the mirror image of it over 2 seconds. | It reads `robot_state`, negates the joints, moves `right_arm.robot`, and confirms. |
@@ -51,7 +51,7 @@ Whether the model can work out what to do is the point of this test, more than w
 
 - Does it use `rr_describe` before acting, or guess at names?
 - Does it call `rr_discover` again when `searching` is true, or conclude that nothing is there?
-- Does it catch the difference between Reynard's commands in meters and its state in millimeters?
+- If it reads Reynard's `state` wire, does it notice that the values are in different units from the commands?
 - When a call fails, does the error message tell it enough to fix the call?
 - Which tools did it ignore or misuse? Their descriptions are in `src/index.ts`.
 
