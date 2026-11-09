@@ -1,0 +1,246 @@
+// Copyright 2011-2026 Wason Technology, LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+import { readFileSync } from "node:fs";
+import { RobotRaconteurNode, subscribeService } from "robotraconteur";
+import type { ServiceStub, ServiceSubscription } from "robotraconteur";
+import { IPNodeDiscoveryFlags, NodeDiscovery, TcpTransport } from "robotraconteur-node";
+import type { ServiceInfo2, ServiceInfo2Subscription, ServiceSubscriptionFilter } from "robotraconteur-node";
+import { Codec } from "./codec.js";
+
+export interface BridgeConfig
+{
+    /** Services at known addresses, used in addition to those found by discovery */
+    services?: { name: string; url: string; username?: string; passwordEnv?: string }[];
+    /** Only use services of these types. Everything found is used if unset */
+    serviceTypes?: string[];
+    /** Only use services on these nodes */
+    nodeNames?: string[];
+    /** Also search using IPv4 broadcast */
+    ipv4Discovery?: boolean;
+    /** Milliseconds to allow for a request. Motion can take a long time */
+    requestTimeout?: number;
+}
+
+export function loadConfig(path: string | undefined): BridgeConfig
+{
+    return path ? (JSON.parse(readFileSync(path, "utf8")) as BridgeConfig) : {};
+}
+
+export interface ReceivedEvent
+{
+    time: string;
+    event: string;
+    arguments: Record<string, unknown>;
+}
+
+const MAX_EVENTS = 200;
+const CONNECT_TIMEOUT_MS = 10000;
+/** How long a search lasts. A node can take this long to be found */
+const SEARCH_WINDOW_MS = 15000;
+/** How often nodes are asked to announce themselves during a search, and otherwise */
+const SEARCH_POLL_MS = 5000;
+const IDLE_POLL_MS = 30000;
+/** Requests closer together than this are combined */
+const MIN_POLL_SPACING_MS = 1000;
+
+/** A service the AI is using, kept connected by a subscription */
+export interface ConnectedService
+{
+    subscription: ServiceSubscription;
+    events: ReceivedEvent[];
+    droppedEvents: number;
+}
+
+/** Finds services, gives them short names, and keeps connections to the ones in use */
+export class ServiceRegistry
+{
+    readonly node = new RobotRaconteurNode();
+    private tcp = new TcpTransport(this.node);
+    private discovery: NodeDiscovery;
+    private found: ServiceInfo2Subscription | null = null;
+    private connected = new Map<string, ConnectedService>();
+    private search_until = 0;
+    private last_poll = 0;
+    private poll_timer: ReturnType<typeof setTimeout> | undefined;
+
+    constructor(private config: BridgeConfig)
+    {
+        this.node.requestTimeout = config.requestTimeout ?? 120000;
+        this.node.registerTransport(this.tcp);
+        this.discovery = new NodeDiscovery(this.node, this.tcp, {
+            flags: IPNodeDiscoveryFlags.LinkLocal | (config.ipv4Discovery ? IPNodeDiscoveryFlags.IPv4Broadcast : 0)
+        });
+    }
+
+    async start(): Promise<void>
+    {
+        await this.discovery.start();
+        const filter: ServiceSubscriptionFilter = {};
+        if (this.config.nodeNames) filter.nodes = this.config.nodeNames.map((nodeName) => ({ nodeName }));
+        this.found = this.discovery.subscribeServiceInfo2(this.config.serviceTypes ?? [], filter);
+        this.startSearch();
+    }
+
+    async close(): Promise<void>
+    {
+        clearTimeout(this.poll_timer);
+        this.discovery.close();
+        await this.node.shutdown();
+    }
+
+    /** Short names stay simple where possible: the service name, or node.service if it is shared */
+    private named(): Map<string, ServiceInfo2>
+    {
+        // Every node has this service. It is how discovery itself finds the others
+        const infos = (this.found?.getDetectedServiceInfo2() ?? []).filter((i) => i.name !== "RobotRaconteurServiceIndex");
+        const counts = new Map<string, number>();
+        for (const i of infos) counts.set(i.name, (counts.get(i.name) ?? 0) + 1);
+        const out = new Map<string, ServiceInfo2>();
+        for (const i of [...infos].sort((a, b) => `${a.nodeName}${a.name}`.localeCompare(`${b.nodeName}${b.name}`)))
+        {
+            let name = counts.get(i.name) === 1 ? i.name : `${i.nodeName || "node"}.${i.name}`;
+            if (out.has(name)) name = `${name}.${i.nodeID.toString().slice(1, 9)}`;
+            out.set(name, i);
+        }
+        return out;
+    }
+
+    /** Whether a service that has not appeared yet may still be found by the search in progress */
+    get searching(): boolean
+    {
+        return Date.now() < this.search_until;
+    }
+
+    /** Seconds until it is worth looking at the list again, while a search is in progress */
+    get checkAgainAfter(): number
+    {
+        return Math.ceil(Math.min(SEARCH_POLL_MS, this.search_until - Date.now()) / 1000);
+    }
+
+    /** Begin a search in the background. The list of services updates as nodes respond */
+    startSearch(): void
+    {
+        this.search_until = Date.now() + SEARCH_WINDOW_MS;
+        this.poll();
+    }
+
+    /** Ask nodes to announce themselves, and schedule the next time to ask */
+    private poll(): void
+    {
+        clearTimeout(this.poll_timer);
+        if (Date.now() - this.last_poll >= MIN_POLL_SPACING_MS)
+        {
+            this.last_poll = Date.now();
+            this.tcp.sendDiscoveryRequest();
+        }
+        this.poll_timer = setTimeout(() => this.poll(), this.searching ? SEARCH_POLL_MS : IDLE_POLL_MS);
+        this.poll_timer.unref();
+    }
+
+    list(): { service: string; info?: ServiceInfo2; url?: string }[]
+    {
+        const configured = (this.config.services ?? []).map((s) => ({ service: s.name, url: s.url }));
+        return [...configured, ...[...this.named()].map(([service, info]) => ({ service, info }))];
+    }
+
+    private connectionFor(name: string): { urls: string[]; username?: string; credentials?: Map<string, unknown> }
+    {
+        const configured = this.config.services?.find((s) => s.name === name);
+        if (configured)
+        {
+            const password = configured.passwordEnv ? process.env[configured.passwordEnv] : undefined;
+            return { urls: [configured.url], username: configured.username, credentials: password === undefined ? undefined : new Map([["password", password]]) };
+        }
+        const info = this.named().get(name);
+        if (!info)
+        {
+            const known = this.list().map((s) => s.service);
+            const still = this.searching ? " The search for services is still running, so it may appear shortly." : "";
+            throw new Error(`Unknown service "${name}".${still} ${known.length > 0 ? `Known services: ${known.join(", ")}` : "Use rr_discover to find services."}`);
+        }
+        return { urls: info.connectionURLs };
+    }
+
+    private attachEvents(service: ConnectedService, client: ServiceStub): void
+    {
+        const scope = client.context.serviceDefForType(client.objectType);
+        const short_name = client.objectType.substring(client.objectType.lastIndexOf(".") + 1);
+        const codec = new Codec(client.context.types);
+        for (const m of scope.objects.find((o) => o.name === short_name)?.members ?? [])
+        {
+            if (m.kind !== "event") continue;
+            client.addEventListener(m.name, (...values: unknown[]) =>
+            {
+                service.events.push({
+                    time: new Date().toISOString(),
+                    event: m.name,
+                    arguments: Object.fromEntries((m.parameters ?? []).map((p, i) => [p.name, codec.toJson(values[i], p.type, scope, { maxArray: 32 })]))
+                });
+                if (service.events.length > MAX_EVENTS)
+                {
+                    service.events.shift();
+                    service.droppedEvents++;
+                }
+            });
+        }
+    }
+
+    private connect(name: string): ConnectedService
+    {
+        let service = this.connected.get(name);
+        if (service) return service;
+        const c = this.connectionFor(name);
+        const created: ConnectedService = { subscription: subscribeService(this.node, c.urls, c.username, c.credentials), events: [], droppedEvents: 0 };
+        created.subscription.addClientConnectListener((_, __, client) => this.attachEvents(created, client));
+        this.connected.set(name, created);
+        service = created;
+        return service;
+    }
+
+    /** Get a connected client for a service. An object path such as "arm.tool[0]" selects a sub object */
+    async resolve(name: string, object?: string): Promise<ServiceStub>
+    {
+        const root = await this.connect(name).subscription.getDefaultClientWait(CONNECT_TIMEOUT_MS);
+        let o = root;
+        for (const part of object ? object.split(".") : [])
+        {
+            const m = /^([A-Za-z_]\w*)(?:\[(.*)\])?$/.exec(part);
+            if (!m) throw new Error(`Invalid object path "${object}". Use names such as arm or tool[0], separated by dots`);
+            const index = m[2];
+            o = await o.getObjRef(m[1]!, index === undefined ? undefined : /^-?\d+$/.test(index) ? Number(index) : index);
+        }
+        return o;
+    }
+
+    /** Return the events received so far. The first call starts connecting to the service */
+    takeEvents(name: string, clear: boolean, limit: number): { events: ReceivedEvent[]; dropped: number }
+    {
+        const service = this.connect(name);
+        const events = service.events.slice(-limit);
+        const dropped = service.droppedEvents;
+        if (clear)
+        {
+            service.events.length = 0;
+            service.droppedEvents = 0;
+        }
+        return { events, dropped };
+    }
+
+    /** Describe known services as JSON */
+    describeServices(codec_for: (info: ServiceInfo2) => Record<string, unknown>): Record<string, unknown>[]
+    {
+        return this.list().map((s) => ({ service: s.service, ...(s.info ? codec_for(s.info) : { url: s.url }) }));
+    }
+}

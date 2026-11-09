@@ -1,0 +1,26 @@
+{
+    "name": "robotraconteur-mcp",
+    "version": "0.1.0",
+    "description": "MCP server that lets AI applications find and use Robot Raconteur services",
+    "license": "Apache-2.0",
+    "author": "Wason Technology, LLC",
+    "type": "module",
+    "private": true,
+    "bin": { "robotraconteur-mcp": "./dist/index.js" },
+    "files": ["dist", "LICENSE", "README.md"],
+    "engines": { "node": ">=22" },
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "build:test": "npm run build && tsc -p tsconfig.test.json",
+        "test": "npm run build:test && node --test --test-concurrency=1 \"dist-test/test/unit/*.test.js\" \"dist-test/test/integration/*.test.js\""
+    },
+    "dependencies": {
+        "@modelcontextprotocol/server": "2.4.0",
+        "zod": "4.6.7"
+    },
+    "devDependencies": {
+        "@modelcontextprotocol/client": "2.4.0",
+        "@types/node": "22.10.2",
+        "typescript": "5.7.2"
+    }
+}

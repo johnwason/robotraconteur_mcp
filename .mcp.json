@@ -1,0 +1,8 @@
+{
+    "mcpServers": {
+        "robotraconteur": {
+            "command": "./scripts/run-demo.sh",
+            "args": []
+        }
+    }
+}
