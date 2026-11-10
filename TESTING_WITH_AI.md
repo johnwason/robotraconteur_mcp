@@ -10,7 +10,7 @@ You need podman, and these folders side by side:
 
 | Folder | Branch |
 | --- | --- |
-| `robotraconteur_typescript` | `node-split` |
+| `robotraconteur_typescript` | `dev` |
 | `robotraconteur_typescript_node` | `dev` |
 | `robotraconteur_mcp` | `dev` |
 
