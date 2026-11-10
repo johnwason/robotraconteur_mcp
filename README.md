@@ -4,9 +4,34 @@
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI application find Robot Raconteur devices on the network and use them. It is an experiment to show what AI and Robot Raconteur can do together.
 
-**This version has no safety layer.** It lets a model move whatever it can reach, so use it only with Reynard the Robot and simulators.
+**This version has no safety layer.** A model can set properties, call functions, and move any robot the server can reach. Anyone running it is responsible for what it is connected to.
 
-The server, and every service it talks to, runs only inside an isolated podman container, on an internal network of its own with no route to the host or the internet.
+## Using it with an AI application
+
+The server is a single file, `robotraconteur-mcp.mjs`, that runs with [Node.js](https://nodejs.org) 22 or newer and needs nothing else installed. The AI application starts it and talks to it over standard input and output.
+
+In Claude Desktop, add it to `claude_desktop_config.json` and restart Claude Desktop:
+
+```json
+{
+    "mcpServers": {
+        "robotraconteur": {
+            "command": "node",
+            "args": ["C:\\path\\to\\robotraconteur-mcp.mjs"]
+        }
+    }
+}
+```
+
+In Claude Code:
+
+```sh
+claude mcp add robotraconteur -- node /path/to/robotraconteur-mcp.mjs
+```
+
+Other applications that support MCP servers over standard input and output are set up the same way: the command is `node`, followed by the path to the file. Restart the application, then ask it what Robot Raconteur devices it can find.
+
+The computer must be on the same network as the devices. Discovery listens on UDP port 48653, so allow Node.js through the firewall when asked. It uses IPv6 link-local multicast, as Robot Raconteur Core does. Add `"ipv4Discovery": true` to a configuration file, described below, if the devices only announce over IPv4. Services that require TLS (`rrs+tcp`) are checked against the Robot Raconteur root certificates built into Core.
 
 ## Tools
 
@@ -37,13 +62,18 @@ Build the images and packages of `robotraconteur_typescript` and `robotraconteur
 ```sh
 podman build -t rr-ts-mcp-dev .
 ./scripts/podman-run.sh npm test
+./scripts/podman-run.sh npm run bundle
 ```
+
+`npm run bundle` writes `dist-bundle/robotraconteur-mcp.mjs`, along with `THIRD_PARTY_LICENSES.txt` for the packages it includes, which should be distributed with it. Setting `RR_MCP_SERVER=dist-bundle/robotraconteur-mcp.mjs` runs the tests against the bundle instead of the normal build.
+
+The tests and builds run inside an isolated podman container, on an internal network of its own with no route to the host or the internet.
 
 The tests drive the real server over stdio with the MCP client, against Reynard, two simulated robots using the standard Robot type, and Core's test service.
 
 ## Running a demo
 
-`./scripts/run-demo.sh` starts the server over stdio in an isolated container, along with Reynard and two simulated robots named `left_arm` and `right_arm`. To use it from an AI client, follow [Testing with an AI client](TESTING_WITH_AI.md).
+[Testing with an AI client](TESTING_WITH_AI.md) connects Claude Code to the server through `.mcp.json` in this folder, with Reynard and two simulated robots named `left_arm` and `right_arm` to find, and suggests prompts to try.
 
 ## License
 

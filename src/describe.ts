@@ -19,6 +19,18 @@ import { typeName } from "./codec.js";
 
 const MAX_TYPES = 100;
 
+/**
+ * Documentation comments are reStructuredText, where indentation has meaning. Remove only the
+ * indentation the lines share, usually the space after each ##, and the blank lines around them.
+ */
+function doc(text: string): string
+{
+    const lines = text.split("\n").map((l) => l.replace(/\s+$/, ""));
+    const indents = lines.filter((l) => l.length > 0).map((l) => /^[ \t]*/.exec(l)![0].length);
+    const common = indents.length > 0 ? Math.min(...indents) : 0;
+    return lines.map((l) => l.slice(common)).join("\n").replace(/^\n+|\n+$/g, "");
+}
+
 function direction(m: MemberDefinition): string | undefined
 {
     if (m.modifiers?.includes("readonly")) return "readonly";
@@ -40,7 +52,7 @@ function memberSummary(m: MemberDefinition): Record<string, unknown>
     if (m.parameters) out["parameters"] = parameters(m, false);
     const d = direction(m);
     if (d) out["direction"] = d;
-    if (m.docString) out["doc"] = m.docString.trim();
+    if (m.docString) out["doc"] = doc(m.docString);
     return out;
 }
 
@@ -53,7 +65,7 @@ function collectTypes(t: TypeDefinition, scope: ServiceDefinition, types: TypeCo
     if (r.kind === "enum")
     {
         const e = r.def.enums.find((x) => r.qualifiedName.endsWith("." + x.name))!;
-        out.set(r.qualifiedName, { kind: "enum", values: Object.fromEntries(e.values.map((v) => [v.name, v.value])), ...(e.docString ? { doc: e.docString.trim() } : {}) });
+        out.set(r.qualifiedName, { kind: "enum", values: Object.fromEntries(e.values.map((v) => [v.name, v.value])), ...(e.docString ? { doc: doc(e.docString) } : {}) });
         return;
     }
     if (r.kind === "object")
@@ -64,8 +76,8 @@ function collectTypes(t: TypeDefinition, scope: ServiceDefinition, types: TypeCo
     const entry = r.entry!;
     out.set(r.qualifiedName, {
         kind: r.kind,
-        ...(entry.docString ? { doc: entry.docString.trim() } : {}),
-        fields: entry.members.map((m) => ({ name: m.name, type: typeName(m.type!), ...(m.docString ? { doc: m.docString.trim() } : {}) }))
+        ...(entry.docString ? { doc: doc(entry.docString) } : {}),
+        fields: entry.members.map((m) => ({ name: m.name, type: typeName(m.type!), ...(m.docString ? { doc: doc(m.docString) } : {}) }))
     });
     for (const m of entry.members) collectTypes(m.type!, r.def, types, out);
 }
@@ -82,7 +94,8 @@ export function describeObject(stub: ServiceStub, member?: string): Record<strin
     {
         return {
             objectType: stub.objectType,
-            ...(entry.docString ? { doc: entry.docString.trim() } : {}),
+            ...(scope.docString ? { serviceDoc: doc(scope.docString) } : {}),
+            ...(entry.docString ? { doc: doc(entry.docString) } : {}),
             members: entry.members.map(memberSummary),
             hint: "Call robotraconteur_describe again with member set to see the fields and enum values of the types a member uses."
         };

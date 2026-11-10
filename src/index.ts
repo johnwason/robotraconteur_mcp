@@ -47,7 +47,9 @@ const name = (kind: string) => z.string().describe(`Name of the ${kind}, as list
 
 export function createServer(tools: BridgeTools): McpServer
 {
-    const server = new McpServer({ name: "robotraconteur-mcp", version: "0.1.0" });
+    const server = new McpServer({ name: "robotraconteur-mcp", version: "0.1.0" }, {
+        instructions: "Robot Raconteur is a communication framework for robots and other devices. Values use SI units and radians unless the service documentation says otherwise: meters, seconds, kilograms, newtons, radians, and radians per second."
+    });
 
     server.registerTool("robotraconteur_discover", {
         description: "List the Robot Raconteur services found so far on the network: devices such as robots, cameras, and sensors. Start here. It answers immediately while searching continues in the background, so if searching is true and something is missing, call it again after check_again_after_s seconds. Use robotraconteur_describe to see what a service can do.",
@@ -56,7 +58,7 @@ export function createServer(tools: BridgeTools): McpServer
     }, ({ refresh }) => respond(() => tools.discover(refresh ?? false)));
 
     server.registerTool("robotraconteur_describe", {
-        description: "Show what a service can do: its properties, functions, wires, events, and sub objects, with documentation. Set member to see the fields of the structures and the names of the enums that member uses.",
+        description: "Show what a service can do: its properties, functions, wires, events, and sub objects, with documentation. Set member to see the fields of the structures and the names of the enums that member uses. Documentation is reStructuredText. Values use SI units and radians unless the documentation says otherwise.",
         inputSchema: z.object({ service, object, member: z.string().optional().describe("Show the details of this member") }),
         annotations: { readOnlyHint: true }
     }, ({ service: s, object: o, member }) => respond(() => tools.describe(s, o, member)));

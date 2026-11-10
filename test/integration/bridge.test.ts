@@ -62,7 +62,8 @@ function waitForPort(port: number, timeout = 60000): Promise<void>
 
 async function startBridge(config?: object): Promise<Client>
 {
-    const args = ["dist/index.js"];
+    // RR_MCP_SERVER selects another build of the server, such as the single file bundle
+    const args = [process.env.RR_MCP_SERVER ?? "dist/index.js"];
     if (config)
     {
         const path = join(tmpdir(), `bridge_config_${Date.now()}.json`);

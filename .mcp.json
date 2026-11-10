@@ -1,8 +1,8 @@
 {
     "mcpServers": {
         "robotraconteur": {
-            "command": "./scripts/run-demo.sh",
-            "args": []
+            "command": "node",
+            "args": ["dist-bundle/robotraconteur-mcp.mjs"]
         }
     }
 }

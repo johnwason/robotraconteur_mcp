@@ -1,7 +1,6 @@
 #!/bin/sh
-# Run a command in an isolated container. The internal network has no route to the host or the
-# internet, and the other Robot Raconteur packages are mounted read only. The MCP server, and every
-# service it talks to, must only be run this way.
+# Run a command in an isolated container, for builds and tests. The internal network has no route to
+# the host or the internet, and the other Robot Raconteur packages are mounted read only.
 cd "$(dirname "$0")/.." || exit 1
 root=$(cd .. && pwd)
 
