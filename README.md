@@ -10,15 +10,15 @@ The server, and every service it talks to, runs only inside an isolated podman c
 
 | Tool | Purpose |
 | --- | --- |
-| `rr_discover` | List services found so far. It answers immediately, and reports when a background search is still running |
-| `rr_describe` | Show a service's members and documentation, or the types one member uses |
-| `rr_get_property`, `rr_set_property` | Read and write properties |
-| `rr_call_function` | Call a function. Generators run to completion |
-| `rr_read_wire`, `rr_write_wire` | Get or set the latest value of a wire |
-| `rr_read_events` | Return events the service has sent |
-| `rr_robot_move_joints` | Move a standard robot smoothly to joint positions |
+| `robotraconteur_discover` | List services found so far. It answers immediately, and reports when a background search is still running |
+| `robotraconteur_describe` | Show a service's members and documentation, or the types one member uses |
+| `robotraconteur_get_property`, `robotraconteur_set_property` | Read and write properties |
+| `robotraconteur_call_function` | Call a function. Generators run to completion |
+| `robotraconteur_read_wire`, `robotraconteur_write_wire` | Get or set the latest value of a wire |
+| `robotraconteur_read_events` | Return events the service has sent |
+| `robotraconteur_robot_move_joints` | Move a standard robot smoothly to joint positions |
 
-Services are named by `rr_discover` as `node.service`, and a name stays the same while the server runs. The service name alone also works when only one service has it. If two nodes share a node name, the later one gets part of its node ID added to the name. Sub objects are selected with paths such as `arm.tool[0]`. Enums can be given by name, and fields left out of a structure are filled with zero or empty values. Discovery runs continuously in the background, and a search can take up to 15 seconds to find a service. `rr_discover` never waits for one. While searching it returns `searching: true` and `check_again_after_s`.
+Services are named by `robotraconteur_discover` as `node.service`, and a name stays the same while the server runs. The service name alone also works when only one service has it. If two nodes share a node name, the later one gets part of its node ID added to the name. Sub objects are selected with paths such as `arm.tool[0]`. Enums can be given by name, and fields left out of a structure are filled with zero or empty values. Discovery runs continuously in the background, and a search can take up to 15 seconds to find a service. `robotraconteur_discover` never waits for one. While searching it returns `searching: true` and `check_again_after_s`.
 
 An optional JSON file, passed as the first argument, can limit what is used:
 

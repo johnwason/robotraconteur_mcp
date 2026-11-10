@@ -84,7 +84,7 @@ export function describeObject(stub: ServiceStub, member?: string): Record<strin
             objectType: stub.objectType,
             ...(entry.docString ? { doc: entry.docString.trim() } : {}),
             members: entry.members.map(memberSummary),
-            hint: "Call rr_describe again with member set to see the fields and enum values of the types a member uses."
+            hint: "Call robotraconteur_describe again with member set to see the fields and enum values of the types a member uses."
         };
     }
 

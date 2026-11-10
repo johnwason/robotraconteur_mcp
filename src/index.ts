@@ -41,38 +41,38 @@ async function respond(run: () => Promise<Result> | Result)
     }
 }
 
-const service = z.string().describe("Name of the service, as listed by rr_discover");
+const service = z.string().describe("Name of the service, as listed by robotraconteur_discover");
 const object = z.string().optional().describe("Path to a sub object, such as arm or arm.tool[0]. Leave unset for the root object");
-const name = (kind: string) => z.string().describe(`Name of the ${kind}, as listed by rr_describe`);
+const name = (kind: string) => z.string().describe(`Name of the ${kind}, as listed by robotraconteur_describe`);
 
 export function createServer(tools: BridgeTools): McpServer
 {
     const server = new McpServer({ name: "robotraconteur-mcp", version: "0.1.0" });
 
-    server.registerTool("rr_discover", {
-        description: "List the Robot Raconteur services found so far on the network: devices such as robots, cameras, and sensors. Start here. It answers immediately while searching continues in the background, so if searching is true and something is missing, call it again after check_again_after_s seconds. Use rr_describe to see what a service can do.",
+    server.registerTool("robotraconteur_discover", {
+        description: "List the Robot Raconteur services found so far on the network: devices such as robots, cameras, and sensors. Start here. It answers immediately while searching continues in the background, so if searching is true and something is missing, call it again after check_again_after_s seconds. Use robotraconteur_describe to see what a service can do.",
         inputSchema: z.object({ refresh: z.boolean().optional().describe("Start a new search in the background, for a device that may have just appeared") }),
         annotations: { readOnlyHint: true }
     }, ({ refresh }) => respond(() => tools.discover(refresh ?? false)));
 
-    server.registerTool("rr_describe", {
+    server.registerTool("robotraconteur_describe", {
         description: "Show what a service can do: its properties, functions, wires, events, and sub objects, with documentation. Set member to see the fields of the structures and the names of the enums that member uses.",
         inputSchema: z.object({ service, object, member: z.string().optional().describe("Show the details of this member") }),
         annotations: { readOnlyHint: true }
     }, ({ service: s, object: o, member }) => respond(() => tools.describe(s, o, member)));
 
-    server.registerTool("rr_get_property", {
+    server.registerTool("robotraconteur_get_property", {
         description: "Read a property of a service.",
         inputSchema: z.object({ service, object, name: name("property") }),
         annotations: { readOnlyHint: true }
     }, ({ service: s, object: o, name: n }) => respond(() => tools.getProperty(s, o, n)));
 
-    server.registerTool("rr_set_property", {
+    server.registerTool("robotraconteur_set_property", {
         description: "Write a property of a service. Enums can be given by name. 64-bit integers can be given as decimal strings.",
         inputSchema: z.object({ service, object, name: name("property"), value: z.unknown().describe("The value, in JSON") })
     }, ({ service: s, object: o, name: n, value }) => respond(() => tools.setProperty(s, o, n, value)));
 
-    server.registerTool("rr_call_function", {
+    server.registerTool("robotraconteur_call_function", {
         description: "Call a function of a service. Arguments are given in order as an array, or by name as an object. Fields left out of a structure are filled with zero or empty values. A function that streams results as a generator is run to completion, and its last results are returned.",
         inputSchema: z.object({
             service,
@@ -84,18 +84,18 @@ export function createServer(tools: BridgeTools): McpServer
         })
     }, (a) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60)));
 
-    server.registerTool("rr_read_wire", {
+    server.registerTool("robotraconteur_read_wire", {
         description: "Read the latest value of a wire. Wires carry continuously updated data such as robot state and sensor readings.",
         inputSchema: z.object({ service, object, name: name("wire") }),
         annotations: { readOnlyHint: true }
     }, ({ service: s, object: o, name: n }) => respond(() => tools.readWire(s, o, n)));
 
-    server.registerTool("rr_write_wire", {
+    server.registerTool("robotraconteur_write_wire", {
         description: "Set the value being sent on a wire.",
         inputSchema: z.object({ service, object, name: name("wire"), value: z.unknown().describe("The value, in JSON") })
     }, ({ service: s, object: o, name: n, value }) => respond(() => tools.writeWire(s, o, n, value)));
 
-    server.registerTool("rr_read_events", {
+    server.registerTool("robotraconteur_read_events", {
         description: "Return events a service has sent, such as a chat message arriving. Events are only collected after a service has first been used, so call this once to begin.",
         inputSchema: z.object({
             service,
@@ -104,8 +104,8 @@ export function createServer(tools: BridgeTools): McpServer
         })
     }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50)));
 
-    server.registerTool("rr_robot_move_joints", {
-        description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with rr_read_wire to find the current position.",
+    server.registerTool("robotraconteur_robot_move_joints", {
+        description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position.",
         inputSchema: z.object({
             service,
             object,

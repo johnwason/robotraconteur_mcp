@@ -27,10 +27,10 @@ const COMMAND_MODE_TRAJECTORY = 2;
 const WAYPOINT_SPACING_S = 0.05;
 
 const TOOL_FOR_KIND: Record<string, string> = {
-    property: "Use rr_get_property or rr_set_property.",
-    function: "Use rr_call_function.",
-    wire: "Use rr_read_wire or rr_write_wire.",
-    event: "Use rr_read_events.",
+    property: "Use robotraconteur_get_property or robotraconteur_set_property.",
+    function: "Use robotraconteur_call_function.",
+    wire: "Use robotraconteur_read_wire or robotraconteur_write_wire.",
+    event: "Use robotraconteur_read_events.",
     objref: "Select it with the object argument."
 };
 
@@ -44,7 +44,7 @@ function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinit
     const m = stub.context.findMember(stub.objectType, name);
     if (m && kinds.includes(m.kind)) return m;
     if (m) throw new Error(`"${name}" is ${withArticle(m.kind)}, not ${withArticle(kinds.join(" or "))}. ${TOOL_FOR_KIND[m.kind] ?? `There is no tool for using ${withArticle(m.kind)}.`}`);
-    throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use rr_describe to list its members.`);
+    throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use robotraconteur_describe to list its members.`);
 }
 
 function scope(stub: ServiceStub)

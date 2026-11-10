@@ -146,7 +146,7 @@ export class ServiceRegistry
         const reason = failure === undefined ? "" : failure instanceof RobotRaconteurError ? ` The last attempt failed with ${failure.errorName}: ${failure.message}.` : ` The last attempt failed with: ${String(failure)}.`;
         if (configured) return `Service "${name}" is not responding. Check that it is running at ${configured.url}.${reason}`;
         if (this.named().has(name)) return `Service "${name}" is announced on the network but could not be connected to.${reason || " It may be starting or busy. Try again shortly."}`;
-        return `Service "${name}" is not responding and is no longer announced on the network, so it has probably stopped. Use rr_discover to see what is available.`;
+        return `Service "${name}" is not responding and is no longer announced on the network, so it has probably stopped. Use robotraconteur_discover to see what is available.`;
     }
 
     /** Whether a service that has not appeared yet may still be found by the search in progress */
@@ -201,7 +201,7 @@ export class ServiceRegistry
             if ([...this.names.values()].includes(name)) throw new Error(this.notResponding(name));
             const known = this.list().map((s) => s.service);
             const still = this.searching ? " The search for services is still running, so it may appear shortly." : "";
-            throw new Error(`Unknown service "${name}".${still} ${known.length > 0 ? `Known services: ${known.join(", ")}` : "Use rr_discover to find services."}`);
+            throw new Error(`Unknown service "${name}".${still} ${known.length > 0 ? `Known services: ${known.join(", ")}` : "Use robotraconteur_discover to find services."}`);
         }
         return { urls: info.connectionURLs };
     }
