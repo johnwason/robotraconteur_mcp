@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/figures/logo-header.svg"></p>
+
 # robotraconteur-mcp
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI application find Robot Raconteur devices on the network and use them. It is an experiment to show what AI and Robot Raconteur can do together.
