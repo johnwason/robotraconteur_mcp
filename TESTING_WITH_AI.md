@@ -15,7 +15,7 @@ You need Node.js 22 or newer, and the server as a single file in `dist-bundle/ro
 You need Python and these packages:
 
 ```sh
-python -m pip install reynard-the-robot==0.3.0 robotraconteur-abstract-robot==0.2.3 robotraconteurcompanion==0.4.0 general-robotics-toolbox==0.7.3
+python -m pip install reynard-the-robot==0.3.1 robotraconteur-abstract-robot==0.2.3 robotraconteurcompanion==0.4.0 general-robotics-toolbox==0.7.3
 ```
 
 Then start each of these in its own terminal, from this folder:
