@@ -19,8 +19,6 @@ const result = await build({
     target: "node22",
     // ws is CommonJS and uses require, which an ES module does not have
     banner: { js: "#!/usr/bin/env node\nimport { createRequire as __createRequire } from \"node:module\";\nconst require = __createRequire(import.meta.url);" },
-    // ws is found here, since it is only a dependency of robotraconteur-node
-    nodePaths: [join(root, "node_modules")],
     // Optional native speedups of ws, which it does without
     external: ["bufferutil", "utf-8-validate"],
     metafile: true,

@@ -25,13 +25,14 @@
     },
     "dependencies": {
         "@modelcontextprotocol/server": "2.4.0",
+        "robotraconteur": "0.1.0",
+        "robotraconteur-node": "0.1.0",
         "zod": "4.6.7"
     },
     "devDependencies": {
         "@modelcontextprotocol/client": "2.4.0",
         "@types/node": "22.10.2",
         "esbuild": "0.24.2",
-        "typescript": "5.7.2",
-        "ws": "8.22.2"
+        "typescript": "5.7.2"
     }
 }

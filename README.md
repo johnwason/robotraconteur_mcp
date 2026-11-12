@@ -57,7 +57,7 @@ It can also list services at known addresses with `"services": [{ "name": "ur5e"
 
 ## Building and testing
 
-Build the images and packages of `robotraconteur_typescript` and `robotraconteur_typescript_node` first, in folders next to this one. Then:
+`robotraconteur` and `robotraconteur-node` are installed from npm. Build the development images of [robotraconteur_typescript](https://github.com/robotraconteur/robotraconteur_typescript) first, and keep a checkout of it in a folder next to this one, since the tests use its Python test server. Then:
 
 ```sh
 podman build -t rr-ts-mcp-dev .
