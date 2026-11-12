@@ -44,8 +44,38 @@ The computer must be on the same network as the devices. Discovery listens on UD
 | `robotraconteur_read_wire`, `robotraconteur_write_wire` | Get or set the latest value of a wire |
 | `robotraconteur_read_events` | Return events the service has sent |
 | `robotraconteur_robot_move_joints` | Move a standard robot smoothly to joint positions |
+| `robotraconteur_start_sequence` | Start a timed sequence of steps and return its ID immediately |
+| `robotraconteur_sequence_status`, `robotraconteur_cancel_sequence` | Follow a sequence and get its results, or stop it |
 
 Services are named by `robotraconteur_discover` as `node.service`, and a name stays the same while the server runs. The service name alone also works when only one service has it. If two nodes share a node name, the later one gets part of its node ID added to the name. Sub objects are selected with paths such as `arm.tool[0]`. Enums can be given by name, and fields left out of a structure are filled with zero or empty values. Discovery runs continuously in the background, and a search can take up to 15 seconds to find a service. `robotraconteur_discover` never waits for one. While searching it returns `searching: true` and `check_again_after_s`.
+
+### Timed sequences
+
+Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of steps and returns a `sequence_id` straight away:
+
+```json
+{
+    "steps": [
+        { "action": "call_function", "service": "reynard", "name": "say", "arguments": ["Watch this"] },
+        { "action": "wait", "seconds": 2 },
+        { "action": "robot_move_joints", "service": "left_arm.robot", "joint_position": [0.3, 0, 0, 0, 0, 0], "duration_s": 2 },
+        { "action": "read_wire", "service": "left_arm.robot", "name": "robot_state", "repeat": { "count": 10, "every_s": 0.1 } },
+        { "action": "set_property", "service": "reynard", "name": "color", "value": [0, 1, 0], "at_s": 8 }
+    ],
+    "max_duration_s": 30
+}
+```
+
+- Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`.
+- Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later. `repeat` runs a step `count` times, `every_s` apart.
+- A `robot_move_joints` step finishes when the robot arrives. To do something during a motion, such as sampling a wire, start a second sequence; sequences run side by side.
+- A sequence is not for polling, such as repeating `read_wire` to wait for something to happen. It runs a fixed plan and cannot react to what it reads, so `repeat` is for samples at set times. The tool description tells the model this.
+- Every step is checked before the sequence starts, including the services, members, values, and arguments, so a mistake is reported before anything moves.
+- A sequence stops at the first failed step unless that step has `continue_on_error`.
+- It is stopped after `max_duration_s` seconds: 60 by default and 600 at most.
+- At most 200 steps, 2000 runs counting repeats, and 8 sequences running at once.
+
+`robotraconteur_sequence_status` reports the state (`running`, `completed`, `failed`, `cancelled`, or `timed_out`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
 
 An optional JSON file, passed as the first argument, can limit what is used:
 
@@ -57,7 +87,7 @@ It can also list services at known addresses with `"services": [{ "name": "ur5e"
 
 ## Building and testing
 
-Build the images and packages of `robotraconteur_typescript` and `robotraconteur_typescript_node` first, in folders next to this one. Then:
+`robotraconteur` and `robotraconteur-node` are installed from npm. Build the development images of [robotraconteur_typescript](https://github.com/robotraconteur/robotraconteur_typescript) first, and keep a checkout of it in a folder next to this one, since the tests use its Python test server. Then:
 
 ```sh
 podman build -t rr-ts-mcp-dev .

@@ -118,6 +118,32 @@ export class BridgeTools
         return { ok: true };
     }
 
+    /**
+     * Check that a member can be used as a tool would use it, converting the value or arguments given
+     * for it, without using it. "service" only checks that the service can be reached, and "robot"
+     * checks for a standard robot that robot_move_joints can move
+     */
+    async check(service: string, object: string | undefined, kind: "service" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
+    {
+        const stub = await this.registry.resolve(service, object);
+        if (kind === "service") return;
+        if (kind === "robot")
+        {
+            member(stub, "execute_trajectory", ["function"]);
+            return;
+        }
+        const m = member(stub, name, [kind]);
+        if (kind === "function")
+        {
+            this.convertArguments(stub, m, value);
+            this.convertGeneratorInputs(stub, m, generator_inputs);
+        }
+        else if (value !== undefined)
+        {
+            new Codec(stub.context.types).fromJson(value, m.type!, scope(stub), name);
+        }
+    }
+
     private convertArguments(stub: ServiceStub, m: MemberDefinition, args: unknown): unknown[]
     {
         const parameters = (m.parameters ?? []).filter((p) => p.type.container !== "generator");
@@ -151,15 +177,40 @@ export class BridgeTools
         return inputs.map((v, i) => codec.fromJson(v, item, scope(stub), `generator_inputs[${i}]`));
     }
 
-    private async runGenerator(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number): Promise<Record<string, unknown>>
+    /**
+     * Run a generator to its end. If the signal aborts, the generator is aborted on the service and
+     * the signal's reason is thrown
+     */
+    private async runGenerator(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
-        const codec = new Codec(stub.context.types);
+        // A call to next can wait a long time for a robot, so the abort is sent as soon as it happens
+        const abort = () => void stub.callFunctionGenAbort(handle).catch(() => undefined);
+        signal?.addEventListener("abort", abort, { once: true });
+        try
+        {
+            if (signal?.aborted) abort();
+            return await this.generatorLoop(stub, handle, inputs, timeout_s, signal);
+        }
+        catch (e)
+        {
+            if (signal?.aborted) throw signal.reason;
+            throw e;
+        }
+        finally
+        {
+            signal?.removeEventListener("abort", abort);
+        }
+    }
+
+    private async generatorLoop(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
+    {
         const deadline = Date.now() + timeout_s * 1000;
         const results: unknown[] = [];
         let count = 0;
         let i = 0;
         for (;;)
         {
+            if (signal?.aborted) throw signal.reason;
             if (Date.now() > deadline)
             {
                 await stub.callFunctionGenAbort(handle);
@@ -190,7 +241,7 @@ export class BridgeTools
         }
     }
 
-    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number): Promise<Record<string, unknown>>
+    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["function"]);
@@ -199,7 +250,7 @@ export class BridgeTools
         const inputs = this.convertGeneratorInputs(stub, m, generator_inputs);
         const result = await stub.callFunction(name, converted);
         const generator = m.type?.container === "generator" || m.parameters?.some((p) => p.type.container === "generator");
-        if (generator) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s);
+        if (generator) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal);
         return { result: m.type?.type === "void" ? null : encode(stub, result, m.type) };
     }
 
@@ -230,7 +281,7 @@ export class BridgeTools
     }
 
     /** Move a standard robot to joint positions, building a trajectory that meets the driver's rules */
-    async robotMoveJoints(service: string, object: string | undefined, target: number[], duration_s: number): Promise<Record<string, unknown>>
+    async robotMoveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         // Starting a motion selects the command mode, which would stop one already running
         const key = `${service}/${object ?? ""}`;
@@ -238,7 +289,7 @@ export class BridgeTools
         this.moving.add(key);
         try
         {
-            return await this.moveJoints(service, object, target, duration_s);
+            return await this.moveJoints(service, object, target, duration_s, signal);
         }
         finally
         {
@@ -246,7 +297,7 @@ export class BridgeTools
         }
     }
 
-    private async moveJoints(service: string, object: string | undefined, target: number[], duration_s: number): Promise<Record<string, unknown>>
+    private async moveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
         member(stub, "execute_trajectory", ["function"]);
@@ -277,8 +328,19 @@ export class BridgeTools
         await sleep(100);
         await stub.setProperty("command_mode", COMMAND_MODE_TRAJECTORY);
 
+        if (signal?.aborted) throw signal.reason;
         const generator = await stub.callFunction("execute_trajectory", [{ joint_names, joint_units: null, waypoints, extended: null }]) as GeneratorHandle;
-        const run = await this.runGenerator(stub, generator, undefined, duration_s + 30);
+        let run: Record<string, unknown>;
+        try
+        {
+            run = await this.runGenerator(stub, generator, undefined, duration_s + 30, signal);
+        }
+        catch (e)
+        {
+            // Stopped partway, such as by cancelling a sequence. The robot must not be left in trajectory mode
+            if (signal?.aborted) await stub.setProperty("command_mode", COMMAND_MODE_HALT).catch(() => undefined);
+            throw e;
+        }
         return { ...run, results: undefined, start, target, final_position: Array.from((await state()).joint_position) };
     }
 }
