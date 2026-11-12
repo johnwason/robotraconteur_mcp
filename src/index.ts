@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { RobotRaconteurError } from "robotraconteur";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
+import { errorText } from "./errors.js";
 import { loadConfig, ServiceRegistry } from "./registry.js";
+import { SEQUENCE_ACTIONS, SEQUENCE_LIMITS, SequenceRunner } from "./sequence.js";
+import type { SequenceStep } from "./sequence.js";
 import { BridgeTools } from "./tools.js";
 
 type Result = Record<string, unknown>;
-
-function hintFor(e: RobotRaconteurError): string
-{
-    if (e.errorName === "RobotRaconteur.ObjectLockedError") return " The object is locked by another client.";
-    return "";
-}
 
 async function respond(run: () => Promise<Result> | Result)
 {
@@ -36,8 +32,7 @@ async function respond(run: () => Promise<Result> | Result)
     }
     catch (e)
     {
-        const text = e instanceof RobotRaconteurError ? `${e.errorName}${e.message ? `: ${e.message.replace(/\.$/, "")}` : ""}.${hintFor(e)}` : (e as Error).message;
-        return { isError: true, content: [{ type: "text" as const, text }] };
+        return { isError: true, content: [{ type: "text" as const, text: errorText(e) }] };
     }
 }
 
@@ -45,7 +40,30 @@ const service = z.string().describe("Name of the service, as listed by robotraco
 const object = z.string().optional().describe("Path to a sub object, such as arm or arm.tool[0]. Leave unset for the root object");
 const name = (kind: string) => z.string().describe(`Name of the ${kind}, as listed by robotraconteur_describe`);
 
-export function createServer(tools: BridgeTools): McpServer
+const step = z.strictObject({
+    action: z.enum(SEQUENCE_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name, such as name and value for set_property, or joint_position and duration_s for robot_move_joints. wait takes seconds"),
+    label: z.string().optional().describe("A name for the step, shown in its results"),
+    service: z.string().optional().describe("The service, for every action but wait. Steps can use different services"),
+    object: z.string().optional().describe("Path to a sub object. Leave unset for the root object"),
+    name: z.string().optional().describe("The property, function, or wire"),
+    value: z.unknown().optional().describe("For set_property and write_wire, the value in JSON"),
+    arguments: z.unknown().optional().describe("For call_function, an array of arguments or an object keyed by parameter name"),
+    generator_inputs: z.array(z.unknown()).optional().describe("For call_function of a generator that takes a value at each step"),
+    timeout_s: z.number().positive().optional().describe("For call_function of a generator, abort after this many seconds. The default is 60"),
+    joint_position: z.array(z.number()).optional().describe("For robot_move_joints, the target position of every joint"),
+    duration_s: z.number().positive().max(100).optional().describe("For robot_move_joints, how long the motion should take in seconds"),
+    seconds: z.number().min(0).optional().describe("For wait, how long to wait"),
+    clear: z.boolean().optional().describe("For read_events, remove the returned events from the buffer. The default is true"),
+    limit: z.number().int().positive().max(200).optional().describe("For read_events, the most events to return. The default is 50"),
+    at_s: z.number().min(0).optional().describe("Start the step this many seconds after the sequence started, rather than when the previous step finishes. Use it to keep a schedule that does not drift"),
+    repeat: z.strictObject({
+        count: z.number().int().positive().describe("How many times to run the step"),
+        every_s: z.number().min(SEQUENCE_LIMITS.minEvery).describe("Seconds from the start of one run to the start of the next")
+    }).optional().describe("Run the step several times at a fixed interval, such as to sample a wire"),
+    continue_on_error: z.boolean().optional().describe("Go on to the next step if this one fails, rather than stopping the sequence")
+});
+
+export function createServer(tools: BridgeTools, sequences = new SequenceRunner(tools)): McpServer
 {
     const server = new McpServer({ name: "robotraconteur-mcp", version: "0.1.0" }, {
         instructions: "Robot Raconteur is a communication framework for robots and other devices. Values use SI units and radians unless the service documentation says otherwise: meters, seconds, kilograms, newtons, radians, and radians per second."
@@ -116,6 +134,29 @@ export function createServer(tools: BridgeTools): McpServer
         })
     }, (a) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s)));
 
+    server.registerTool("robotraconteur_start_sequence", {
+        description: `Start a timed sequence of actions and return its sequence_id immediately. The steps run in the server without a round trip through the model, so their timing is exact: such as saying something, waiting 2 seconds, then moving, or reading a wire every 0.1 seconds. Steps can call functions, set properties, read and write wires, read events, move standard robots, and wait, on one or more services. Steps run one at a time: each starts when the previous one finishes, or at at_s seconds from the start if that is later, and repeat runs a step at a fixed interval. A robot_move_joints step finishes when the robot arrives, so to do something during a motion, such as sampling a wire, start a second sequence. Every step is checked before anything starts. The sequence stops at the first failed step unless that step has continue_on_error, and is stopped after max_duration_s. Follow it with robotraconteur_sequence_status, and stop it with robotraconteur_cancel_sequence, which also halts a robot it is moving. At most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns} runs counting repeats.`,
+        inputSchema: z.object({
+            steps: z.array(step).min(1).max(SEQUENCE_LIMITS.maxSteps).describe("The steps, in order"),
+            max_duration_s: z.number().positive().max(SEQUENCE_LIMITS.maxDuration).optional().describe(`Stop the sequence after this many seconds. The default is ${SEQUENCE_LIMITS.defaultDuration} and the maximum is ${SEQUENCE_LIMITS.maxDuration}`)
+        })
+    }, (a) => respond(() => sequences.start(a.steps as SequenceStep[], a.max_duration_s)));
+
+    server.registerTool("robotraconteur_sequence_status", {
+        description: "Report the state of a sequence and the results of its steps so far: running, completed, failed, cancelled, or timed_out. Each result has the step index, when it started in seconds from the start of the sequence, how long it took, how late it started if it was late, and its result or error. Set wait_s to wait for the sequence to finish, up to 30 seconds, rather than calling repeatedly. Results are returned in order, and a long list is split over calls: pass next_index as from_index to get the rest, or only the new ones. Without sequence_id, lists the sequences.",
+        inputSchema: z.object({
+            sequence_id: z.string().optional().describe("The sequence, from robotraconteur_start_sequence"),
+            from_index: z.number().int().min(0).optional().describe("Return results from this index. The default is 0"),
+            wait_s: z.number().min(0).max(SEQUENCE_LIMITS.maxStatusWait).optional().describe("Wait up to this many seconds for the sequence to finish before answering")
+        }),
+        annotations: { readOnlyHint: true }
+    }, (a) => respond(() => a.sequence_id === undefined ? sequences.list() : sequences.status(a.sequence_id, a.from_index ?? 0, a.wait_s ?? 0)));
+
+    server.registerTool("robotraconteur_cancel_sequence", {
+        description: "Stop a running sequence. A robot motion it started is aborted and the robot is halted. Returns the sequence's final state and the step that was stopped.",
+        inputSchema: z.object({ sequence_id: z.string().describe("The sequence, from robotraconteur_start_sequence") })
+    }, (a) => respond(() => sequences.cancel(a.sequence_id)));
+
     return server;
 }
 
@@ -124,12 +165,15 @@ async function main(): Promise<void>
     const registry = new ServiceRegistry(loadConfig(process.argv[2]));
     await registry.start();
 
-    const server = createServer(new BridgeTools(registry));
+    const tools = new BridgeTools(registry);
+    const sequences = new SequenceRunner(tools);
+    const server = createServer(tools, sequences);
     await server.connect(new StdioServerTransport());
 
+    // Running sequences are cancelled first, so that a robot is not left moving
     const shutdown = () =>
     {
-        void registry.close().finally(() => process.exit(0));
+        void sequences.cancelAll().finally(() => registry.close()).finally(() => process.exit(0));
     };
     process.stdin.on("end", shutdown);
     process.on("SIGTERM", shutdown);

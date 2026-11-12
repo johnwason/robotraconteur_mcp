@@ -34,7 +34,7 @@ The file `.mcp.json` in this folder registers the server as `robotraconteur`. It
 
 1. Start a new session here: run `claude` in `robotraconteur_mcp`, or open this folder in VS Code and start a new Claude Code conversation.
 2. Approve the `robotraconteur` server when asked.
-3. Run `/mcp`. The server should be connected, with 9 tools.
+3. Run `/mcp`. The server should be connected, with 12 tools.
 
 Claude Code asks permission for each tool the first time it is used. Allow them as they come up, so that you can see each call the model makes.
 
@@ -50,6 +50,8 @@ Start with the first prompt. It keeps the model from learning the devices by rea
 | 4 | Which robot is at the lab site? Move it to joint positions 0.3, -0.2, 0.4, 0, 0.5, 0 radians over 2 seconds and report where it stopped. | It picks `left_arm.robot` from the `site` attribute, and calls `robotraconteur_robot_move_joints`. The call takes a few seconds longer than the motion. The final position should match the target to about 9 decimal places. |
 | 5 | Read where the left arm is, then move the right arm to the mirror image of it over 2 seconds. | It reads `robot_state`, negates the joints, moves `right_arm.robot`, and confirms. |
 | 6 | Type a message into Reynard's web page, then ask: What messages has Reynard received? | It calls `robotraconteur_read_events` for Reynard, and reports the `new_message` event. Events are collected once the service has been used, so earlier prompts must have used Reynard. |
+| 7 | Have Reynard say "Three", "Two", "One" exactly one second apart, then "Go!" while the left arm moves to 0.5, 0, 0, 0, 0, 0 over 3 seconds. Sample the arm's joint 1 every half second during the motion, and tell me how far it had moved at each sample. | It uses `robotraconteur_start_sequence`, with the says one second apart (`at_s` or waits), the motion, and the samples running together. A motion step waits for the robot to arrive, so the samples need `at_s` times that fall during it, or the says and samples go in one sequence and the motion in another. It then calls `robotraconteur_sequence_status` with `wait_s`, rather than many quick calls, and reports the samples with their times. |
+| 8 | Move the right arm to 0.6, 0, 0, 0, 0, 0 over 10 seconds. Then, part way through, say: Stop the right arm now. | It moves the arm with a sequence, or with `robotraconteur_robot_move_joints`, which returns only when the motion ends. With a sequence it can stop the arm with `robotraconteur_cancel_sequence`, which leaves the arm halted part way. Watch whether it chooses the sequence because it expects to be interrupted. |
 
 ## What to watch for
 
@@ -57,6 +59,7 @@ Whether the model can work out what to do is the point of this test, more than w
 
 - Does it use `robotraconteur_describe` before acting, or guess at names?
 - Does it call `robotraconteur_discover` again when `searching` is true, or conclude that nothing is there?
+- Does it use a sequence when timing matters, and `wait_s` rather than calling `robotraconteur_sequence_status` over and over?
 - The service definition gives no units for `teleport`. Does it use meters, as the server instructions say Robot Raconteur assumes, or ask?
 - When a call fails, does the error message tell it enough to fix the call?
 - Which tools did it ignore or misuse? Their descriptions are in `src/index.ts`.
