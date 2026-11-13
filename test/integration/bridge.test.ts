@@ -605,6 +605,41 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
     });
 
+    test("cancelling aborts a generator called by a step", async () =>
+    {
+        const service = "robot_b.robot";
+        // A trajectory called directly, which is a generator that runs as long as the motion
+        // The driver requires waypoints at most 100 ms apart: 0 to 0.3 rad over 3 s, every 50 ms
+        const waypoints = Array.from({ length: 61 }, (_, i) => ({ time_from_start: i * 0.05, joint_position: [0.005 * i, 0, 0, 0, 0, 0] }));
+        const trajectory = { joint_names: ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"], waypoints };
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            steps: [
+                { action: "set_property", service, name: "command_mode", value: "halt" },
+                { action: "wait", seconds: 0.1 },
+                { action: "set_property", service, name: "command_mode", value: "trajectory" },
+                { action: "call_function", service, name: "execute_trajectory", arguments: [trajectory], label: "trajectory" }
+            ]
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const running = await ok(bridge, "robotraconteur_sequence_status", { sequence_id });
+        assert.equal(running.state, "running", JSON.stringify(running));
+        assert.equal(running.current_step.label, "trajectory", JSON.stringify(running));
+
+        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        assert.equal(cancelled.state, "cancelled");
+        assert.equal(cancelled.results[0].label, "trajectory");
+        assert.match(cancelled.results[0].error, /cancelled/);
+
+        // The trajectory was aborted on the robot, which stopped partway and stays there
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const stopped = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
+        assert.ok(stopped[0] > 0.02 && stopped[0] < 0.28, `stopped partway, at ${stopped[0]}`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        assert.deepEqual((await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position, stopped);
+
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+    });
+
     test("a sequence that runs past max_duration_s is stopped", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
