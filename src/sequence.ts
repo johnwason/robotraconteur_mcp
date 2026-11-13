@@ -280,7 +280,10 @@ function combineFields(x: unknown, out = new Set<string>()): Set<string>
  * Check an only_if query: valid, and using only the labels of steps that come before, which must be
  * unique so that it is clear which step each means
  */
-function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceStep[]): void
+/** The key an on_stop step's only_if uses for how the sequence ended */
+const SEQUENCE_KEY = "_sequence";
+
+function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceStep[], on_stop = false): void
 {
     try
     {
@@ -292,6 +295,11 @@ function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceSte
     }
     for (const label of combineFields(only_if))
     {
+        if (label === SEQUENCE_KEY)
+        {
+            if (on_stop) continue;
+            throw new Error(`only_if uses ${SEQUENCE_KEY}, which only on_stop steps can use, since it says how the sequence ended.`);
+        }
         if (!earlier.some((s) => s.label === label)) throw new Error(`only_if uses "${label}", which is not the label of an earlier step. It queries earlier labelled steps by label, such as { "${label}.ok": true }.`);
         if (all.filter((s) => s.label === label).length > 1) throw new Error(`only_if uses "${label}", which labels more than one step. Give the steps different labels.`);
     }
@@ -310,10 +318,15 @@ function record(sequence: Sequence, step: SequenceStep, entry: StepResult): void
     if (step.label !== undefined) sequence.outcomes.set(step.label, { ok: entry.error === undefined && !entry.skipped, skipped: entry.skipped === true, result: entry.result, error: entry.error });
 }
 
-/** Whether a step's only_if holds, from the outcomes of the labelled steps so far */
-function onlyIf(sequence: Sequence, only_if: Record<string, unknown>): boolean
+/**
+ * Whether a step's only_if holds, from the outcomes of the labelled steps so far. For an on_stop step,
+ * _sequence also gives how the sequence ended: its state, and stopped_by and error where it has them
+ */
+function onlyIf(sequence: Sequence, only_if: Record<string, unknown>, on_stop = false): boolean
 {
-    return compileCondition(only_if)(Object.fromEntries(sequence.outcomes));
+    const document: Record<string, unknown> = Object.fromEntries(sequence.outcomes);
+    if (on_stop) document[SEQUENCE_KEY] = { state: sequence.state, stopped_by: sequence.stopped_by, error: sequence.error };
+    return compileCondition(only_if)(document);
 }
 
 class Sequence
@@ -380,7 +393,7 @@ export class SequenceRunner
             if (timing.length > 0) throw new Error(`${where}: on_stop steps run at once and in order, each even if another fails, so they cannot use ${timing.join(", ")}. The sequence was not started.`);
             try
             {
-                if (step.only_if !== undefined) checkOnlyIf(step.only_if, steps, steps);
+                if (step.only_if !== undefined) checkOnlyIf(step.only_if, steps, steps, true);
                 await this.check(step, SEQUENCE_LIMITS.maxDuration);
             }
             catch (e)
@@ -400,6 +413,7 @@ export class SequenceRunner
             try
             {
                 runs += step.repeat?.count ?? 1;
+                if (step.label === SEQUENCE_KEY) throw new Error(`The label ${SEQUENCE_KEY} is kept for on_stop's only_if. Use another label.`);
                 if (step.after !== undefined)
                 {
                     const earlier = steps.slice(0, i).filter((s) => s.label === step.after).length;
@@ -939,7 +953,7 @@ export class SequenceRunner
             {
                 const started = sequence.elapsed;
                 const entry: StepResult = { step: i, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
-                if (step.only_if !== undefined && !onlyIf(sequence, step.only_if))
+                if (step.only_if !== undefined && !onlyIf(sequence, step.only_if, true))
                 {
                     entry.skipped = true;
                     sequence.on_stop_results.push(entry);

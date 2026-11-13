@@ -875,6 +875,31 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(Array.isArray(by(answered).big.result));
     });
 
+    test("on_stop steps can query how the sequence ended with _sequence", async () =>
+    {
+        const service = TEST_SERVICE;
+        const on_stop = [
+            { action: "get_property", service: "reynard", name: "color", label: "by_stop", only_if: { "_sequence.stopped_by.label": "stop" } },
+            { action: "get_property", service: "reynard", name: "color", label: "by_cancel", only_if: { "_sequence.state": "cancelled" } },
+            { action: "get_property", service: "reynard", name: "color", label: "always" }
+        ];
+        const steps = [{ action: "stop_when", service, name: "ev2", condition: {}, label: "stop" }, { action: "wait", seconds: 10 }];
+        const ran = (s: any) => s.on_stop.filter((r: any) => !r.skipped).map((r: any) => r.label);
+
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const stopped = await ok(bridge, "robotraconteur_start_sequence", { steps, on_stop });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [1, 0] });
+        assert.deepEqual(ran(await finish(stopped.sequence_id)), ["by_stop", "always"]);
+
+        const cancelled = await ok(bridge, "robotraconteur_start_sequence", { steps, on_stop });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.deepEqual(ran(await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id: cancelled.sequence_id })), ["by_cancel", "always"]);
+
+        const get = { action: "get_property", service: "reynard", name: "color" };
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, only_if: { "_sequence.state": "failed" } }] }, /only on_stop steps can use/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, label: "_sequence" }] }, /The label _sequence is kept/);
+    });
+
     test("a skipped step does not wait for its time or run its repeats", async () =>
     {
         const status = await ok(bridge, "robotraconteur_start_sequence", {

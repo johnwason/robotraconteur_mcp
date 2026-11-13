@@ -53,8 +53,8 @@ object Diagnostics
     ## Reynard's new_message event fires with it.
     function void send_message(string message)
 
-    ## Send a chat message after delay seconds, without waiting for it. Use it to have a message
-    ## arrive while a sequence runs.
+    ## Send a chat message delay seconds after this call arrives, without waiting for it. Use it to
+    ## have a message arrive while a sequence runs.
     function void send_message_after(string message, double delay)
 
     ## Cancel the messages scheduled with send_message_after that have not been sent yet
