@@ -404,7 +404,7 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
 
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
         await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0], duration_s: 1 }, /has 6 joints but 2/);
-        await fails(bridge, "robotraconteur_robot_move_joints", { service: "reynard", joint_position: [0], duration_s: 1 }, /no function named "execute_trajectory"/);
+        await fails(bridge, "robotraconteur_robot_move_joints", { service: "reynard", joint_position: [0], duration_s: 1 }, /needs a standard robot, com\.robotraconteur\.robotics\.robot\.Robot, .* but this is experimental\.reynard_the_robot\.Reynard/);
 
         // The other robot was not moved
         const other = await ok(bridge, "robotraconteur_read_wire", { service: "robot_b.robot", name: "robot_state" });
@@ -624,7 +624,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await failsStart({ steps: [{ action: "set_property", service: "reynard", name: "color" }] }, /set_property action needs value/);
         await failsStart({ steps: [{ action: "set_property", service: "reynard", name: "color", value: "red" }] }, /steps\[0\]/);
         await failsStart({ steps: [{ action: "wait" }] }, /needs seconds/);
-        await failsStart({ steps: [{ action: "robot_move_joints", service: "reynard", joint_position: [0], duration_s: 1 }] }, /execute_trajectory/);
+        await failsStart({ steps: [{ action: "robot_move_joints", service: "reynard", joint_position: [0], duration_s: 1 }] }, /needs a standard robot/);
         await failsStart({ steps: [{ action: "call_function", service: "reynard", name: "say", args: ["x"] }] }, /args/);
         await failsStart({ steps: [{ action: "read_wire", service: "reynard", name: "state", repeat: { count: 1000, every_s: 1 } }] }, /longer than max_duration_s/);
         await failsStart({ steps: [say], max_duration_s: 10000 }, /max_duration_s/);
@@ -1225,6 +1225,42 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_cancel_sequence", { sequence_ids: [ids[0], "seq-0"] }, /Unknown sequence "seq-0"/);
         const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_ids: ids });
         assert.deepEqual(cancelled.sequences.map((s: any) => s.state), ["cancelled", "cancelled"]);
+    });
+
+    test("stop_together stops the other sequences when one ends early, and not otherwise", async () =>
+    {
+        const service = TEST_SERVICE;
+        const fail = { label: "a", service, steps: [{ action: "wait_until", name: "ev2", condition: { d1: { $gt: 1000 } }, timeout_s: 0.3, label: "never" }] };
+        const on_stop = [{ action: "get_property", service: "reynard", name: "color", label: "cleanup", only_if: { "_sequence.stopped_by.stop_together": true } }];
+        const sequences = [fail, { label: "b", service: "reynard", steps: [{ action: "wait", seconds: 10 }], on_stop }, { label: "c", service: "reynard", steps: [{ action: "get_property", name: "color" }] }];
+        const together = await ok(bridge, "robotraconteur_start_sequence", { stop_together: true, wait_s: 5, detail: "full", sequences });
+        const [a, b, c] = together.sequences;
+        assert.equal(a.state, "failed", JSON.stringify(a));
+        assert.equal(b.state, "stopped", JSON.stringify(b));
+        assert.equal(c.state, "completed", "a sequence that had already completed is left alone");
+        assert.equal(b.stopped_by.stop_together, true);
+        assert.equal(b.stopped_by.sequence_id, a.sequence_id);
+        assert.equal(b.stopped_by.label, "a");
+        assert.equal(b.stopped_by.state, "failed");
+        assert.match(b.stopped_by.sequence_error, /never/);
+        assert.ok(b.stopped_by.at_s < 0.5, String(b.stopped_by.at_s));
+        assert.match(b.stopped, /stopped by stop_together, since seq-\d+ \(a\) failed/);
+        assert.ok(Array.isArray(b.on_stop[0].result), "the stopped sequence ran its own on_stop, which saw stop_together");
+
+        const apart = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 5, sequences: [fail, { label: "b", service: "reynard", steps: [{ action: "wait", seconds: 0.6 }] }] });
+        assert.deepEqual(apart.sequences.map((s: any) => s.state), ["failed", "completed"], "without stop_together, each runs on its own");
+    });
+
+    test("compact results leave out timed steps that started on time", async () =>
+    {
+        const steps = [{ action: "noop", at_s: 0.1 }, { action: "noop", at_s: 0.2 }, { action: "noop", at_s: 0.3, label: "kept" }];
+        const compact = await startSeq({ service: "reynard", steps, wait_s: 5 });
+        assert.equal(compact.state, "completed");
+        assert.deepEqual(compact.results.map((r: any) => r.label), ["kept"], JSON.stringify(compact));
+        assert.equal(compact.omitted, 2);
+        const full = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: compact.sequence_id, detail: "full" });
+        assert.equal(full.results.length, 3);
+        for (const r of full.results) assert.ok(r.late_s <= 0.02, JSON.stringify(r));
     });
 
     test("until returns as soon as a labelled step has a result", async () =>

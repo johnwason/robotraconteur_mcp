@@ -47,6 +47,14 @@ function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinit
     throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use robotraconteur_describe to list its members.`);
 }
 
+/** robot_move_joints needs a standard robot. Says which type is needed and what the service is instead */
+function robotMember(stub: ServiceStub): MemberDefinition
+{
+    const m = stub.context.findMember(stub.objectType, "execute_trajectory");
+    if (m && m.kind === "function") return m;
+    throw new Error(`robot_move_joints needs a standard robot, com.robotraconteur.robotics.robot.Robot, with an execute_trajectory function, but this is ${stub.objectType}. Use robotraconteur_describe to see how to move it.`);
+}
+
 function scope(stub: ServiceStub)
 {
     return stub.context.serviceDefForType(stub.objectType);
@@ -134,7 +142,7 @@ export class BridgeTools
         }
         if (kind === "robot")
         {
-            member(stub, "execute_trajectory", ["function"]);
+            robotMember(stub);
             return;
         }
         const m = member(stub, name, [kind]);
@@ -357,7 +365,7 @@ export class BridgeTools
     private async moveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
-        member(stub, "execute_trajectory", ["function"]);
+        robotMember(stub);
 
         const state = async () => (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array };
         const start = Array.from((await state()).joint_position);

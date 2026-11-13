@@ -473,6 +473,8 @@ class Sequence
     readonly outcomes = new Map<string, { ok: boolean; skipped: boolean; result?: unknown; error?: string }>();
     /** The results of the on_stop steps, if they ran */
     on_stop_results?: StepResult[];
+    /** With stop_together, the sequences started in the same call, which this one stops if it ends early */
+    together?: Sequence[];
 
     constructor(readonly id: string, readonly steps: SequenceStep[], readonly max_duration_s: number, readonly on_stop: SequenceStep[], readonly label: string | undefined, clock: { started: Date; t0: number })
     {
@@ -505,7 +507,7 @@ export class SequenceRunner
      * used by its steps that do not name one. With wait_s, waits up to that long for them all to
      * finish, and reports each as status does
      */
-    async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact", call_stop?: CallStopWhen, until?: string): Promise<Record<string, unknown>>
+    async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact", call_stop?: CallStopWhen, until?: string, stop_together = false): Promise<Record<string, unknown>>
     {
         if (until !== undefined)
         {
@@ -552,6 +554,7 @@ export class SequenceRunner
 
         const clock = { started: new Date(), t0: performance.now() };
         const sequences = prepared.map((p) => this.launch(p, clock));
+        if (stop_together && sequences.length > 1) for (const s of sequences) s.together = sequences;
         if (call_watch) this.startCallMonitor(sequences, call_watch);
         if (wait_s > 0)
         {
@@ -1250,7 +1253,25 @@ export class SequenceRunner
             sequence.finished_s = sequence.elapsed;
             sequence.ended = new Date();
         }
-        if (sequence.state !== "completed" && sequence.on_stop.length > 0) await this.runOnStop(sequence);
+        if (sequence.state !== "completed")
+        {
+            // With stop_together, the others stop at once, before this one's on_stop, so cleanup does not delay them
+            if (sequence.together) this.stopTogether(sequence);
+            if (sequence.on_stop.length > 0) await this.runOnStop(sequence);
+        }
+    }
+
+    /** Stop the other sequences of a stop_together call, since this one ended without completing */
+    private stopTogether(ended: Sequence): void
+    {
+        const which = `${ended.id}${ended.label ? ` (${ended.label})` : ""}`;
+        const how = ended.state.replace("_", " ");
+        for (const s of ended.together!)
+        {
+            if (s === ended || s.state !== "running" || s.controller.signal.aborted) continue;
+            s.stopped_by = { stop_together: true, sequence_id: ended.id, label: ended.label, state: ended.state, sequence_error: ended.error, at_s: round(s.elapsed) };
+            s.controller.abort(new SequenceStopped("stopped", `The sequence was stopped by stop_together, since ${which} ${how === "cancelled" ? "was cancelled" : how}`));
+        }
     }
 
     /**
@@ -1304,7 +1325,7 @@ export class SequenceRunner
         for (; i < sequence.results.length && results.length < MAX_STATUS_RESULTS; i++)
         {
             const r = sequence.results[i]!;
-            if (detail === "compact" && r.error === undefined && r.result === undefined && r.label === undefined && r.late_s === undefined && !r.skipped)
+            if (detail === "compact" && r.error === undefined && r.result === undefined && r.label === undefined && (r.late_s === undefined || r.late_s <= LATE_REPORTED_S) && !r.skipped)
             {
                 omitted++;
                 continue;
