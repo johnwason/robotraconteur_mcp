@@ -27,17 +27,16 @@ from reynard_the_robot.robotraconteur import ReynardRobotRaconteurService
 _diagnostics_robdef = """
 ## Diagnostics for testing with Reynard the Robot without a person at the web page. Not part of
 ## Reynard itself. It can send chat messages as if typed in the web page, and keeps a log of what
-## Reynard was asked to do, with times on the wall clock that event times use.
+## Reynard was asked to do, with ISO 8601 UTC times on the wall clock that event times use.
 service experimental.reynard_diagnostics
 
 stdver 0.10
 
 ## One thing Reynard was asked to do, or a chat message
 struct LogEntry
-    ## Wall clock time, seconds since 1970 UTC
-    field double time
-    ## The same time in ISO 8601 UTC, as event times are given
-    field string time_iso
+    ## When, as an ISO 8601 UTC time with milliseconds, such as 2026-11-13T06:59:17.712Z, the form
+    ## event times are given in
+    field string time
     ## say, color, teleport, set_arm_position, drive_robot, drive_arm, or message
     field string kind
     ## The text said, or the chat message
@@ -61,9 +60,9 @@ object Diagnostics
     ## Cancel the messages scheduled with send_message_after that have not been sent yet
     function void cancel_scheduled_messages()
 
-    ## The log since a wall clock time in seconds since 1970 UTC, oldest first. 0 gives all of it.
-    ## The log keeps the last 1000 entries.
-    function LogEntry{list} read_log(double since)
+    ## The log from an ISO 8601 time on, such as a sequence's started time, oldest first. An empty
+    ## string gives all of it. The log keeps the last 1000 entries.
+    function LogEntry{list} read_log(string since)
 
     ## Empty the log
     function void clear_log()
@@ -71,6 +70,17 @@ end
 """
 
 _LOG_SIZE = 1000
+
+
+def _parse_iso(text):
+    """Seconds since 1970 from an ISO 8601 time. A time without a zone is taken as UTC"""
+    try:
+        t = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise RR.InvalidArgumentException(f"since must be an ISO 8601 time, such as 2026-11-13T06:59:17.712Z, or an empty string, not {text!r}")
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    return t.timestamp()
 
 
 class _Log:
@@ -84,7 +94,8 @@ class _Log:
         with self._lock:
             self._entries.append((now, iso, kind, text, [float(v) for v in values]))
 
-    def since(self, t):
+    def since(self, since):
+        t = _parse_iso(since) if since else 0.0
         with self._lock:
             return [e for e in self._entries if e[0] >= t]
 
@@ -171,10 +182,9 @@ class DiagnosticsImpl:
 
     def read_log(self, since):
         out = []
-        for t, iso, kind, text, values in self._log.since(since):
+        for _, iso, kind, text, values in self._log.since(since):
             e = self._entry_type()
-            e.time = t
-            e.time_iso = iso
+            e.time = iso
             e.kind = kind
             e.text = text
             e.values = np.array(values, dtype=np.float64)

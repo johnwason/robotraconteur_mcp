@@ -42,6 +42,8 @@ interface PreparedWatch
     kinds: ("wire" | "property" | "event")[];
     combine?: (value: unknown) => boolean;
     since?: number;
+    /** Events left for a stop_when of the same sequence, which a wait_until does not take */
+    reserved?: (service: string, event: string, args: Record<string, unknown>) => boolean;
 }
 
 /** What one check found for one watched thing */
@@ -291,7 +293,7 @@ class Sequence
     stopped_by?: Record<string, unknown>;
     stop_message?: string;
     /** The stop_when steps started, by step index, and whether each is still watching */
-    readonly monitors = new Map<number, { label?: string; active: boolean }>();
+    readonly monitors = new Map<number, { label?: string; active: boolean; watch: PreparedWatch }>();
     total_runs = 0;
     readonly results: StepResult[] = [];
     readonly controller = new AbortController();
@@ -591,7 +593,7 @@ export class SequenceRunner
         }
     }
 
-    private async act(step: SequenceStep, signal: AbortSignal): Promise<unknown>
+    private async act(step: SequenceStep, signal: AbortSignal, sequence?: Sequence): Promise<unknown>
     {
         const s = step.service!;
         switch (step.action)
@@ -620,7 +622,7 @@ export class SequenceRunner
         case "robot_move_joints":
             return await this.tools.robotMoveJoints(s, step.object, step.joint_position!, step.duration_s!, signal);
         case "wait_until":
-            return await this.waitUntil(step, signal);
+            return await this.waitUntil(step, signal, sequence);
         }
     }
 
@@ -663,7 +665,9 @@ export class SequenceRunner
         {
             if (p.kinds[i] === "event")
             {
-                const event = this.tools.findEvent(w.service, w.name, w.test, p.since);
+                const reserved = p.reserved;
+                const test = reserved ? (args: Record<string, unknown>) => w.test(args) && !reserved(w.service, w.name, args) : w.test;
+                const event = this.tools.findEvent(w.service, w.name, test, p.since);
                 return { matched: event !== undefined, event };
             }
             const value = await this.tools.readValue(w.service, w.object, w.name);
@@ -698,9 +702,12 @@ export class SequenceRunner
     }
 
     /** Wait until the watched things meet their conditions, taking the events that did. Fails when timeout_s passes */
-    private async waitUntil(step: SequenceStep, signal: AbortSignal): Promise<unknown>
+    private async waitUntil(step: SequenceStep, signal: AbortSignal, sequence?: Sequence): Promise<unknown>
     {
         const p = await this.prepareWatch(step);
+        // An event that a stop_when of the same sequence matches is left for it, so the stop wins
+        if (sequence) p.reserved = (service, event, args) => [...sequence.monitors.values()].some((m) =>
+            m.active && !m.watch.step.combine && m.watch.watches.some((w, i) => m.watch.kinds[i] === "event" && w.service === service && w.name === event && w.test(args)));
         const started = performance.now();
         const deadline = started + step.timeout_s! * 1000;
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
@@ -730,7 +737,7 @@ export class SequenceRunner
         const started = performance.now();
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
         const which = `stop_when steps[${index}]${step.label ? ` (${step.label})` : ""}`;
-        const monitor = { label: step.label, active: true };
+        const monitor = { label: step.label, active: true, watch: p };
         sequence.monitors.set(index, monitor);
         void (async () =>
         {
@@ -826,7 +833,7 @@ export class SequenceRunner
                     {
                         // A robot motion, a generator, or a wait stops itself when aborted, halting a robot
                         // first, so it is waited for. Other requests are left to finish in the background
-                        const action = step.action === "stop_when" ? this.startStopWhen(sequence, step, i) : step.action === "end_stop_when" ? Promise.resolve(this.endStopWhen(sequence, step)) : this.act(step, signal);
+                        const action = step.action === "stop_when" ? this.startStopWhen(sequence, step, i) : step.action === "end_stop_when" ? Promise.resolve(this.endStopWhen(sequence, step)) : this.act(step, signal, sequence);
                         const result = SIGNALLED.includes(step.action) ? await action : await untilAborted(action, signal);
                         if (result !== null && result !== undefined) entry.result = result;
                     }

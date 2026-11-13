@@ -919,12 +919,36 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(status.stopped_by.event_to_stop_s < 0.2, `stopped soon after the message: ${status.stopped_by.event_to_stop_s}`);
 
         // The log shows the message, then Reynard saying Stopped right after it
-        const log = (await ok(bridge, "robotraconteur_call_function", { service: diagnostics, name: "read_log", arguments: [0] })).result;
+        const log = (await ok(bridge, "robotraconteur_call_function", { service: diagnostics, name: "read_log", arguments: [status.started] })).result;
         const message = log.find((e: any) => e.kind === "message");
         const stopped = log.find((e: any) => e.kind === "say" && e.text === "Stopped");
         assert.ok(message && stopped, JSON.stringify(log));
-        assert.ok(stopped.time - message.time < 0.3, `Stopped was said ${stopped.time - message.time} s after the message`);
+        const gap = (Date.parse(stopped.time) - Date.parse(message.time)) / 1000;
+        assert.ok(gap >= 0 && gap < 0.3, `Stopped was said ${gap} s after the message`);
+        // The log's time is when Reynard sent the message, and the event's when the MCP server got it
+        assert.ok(Math.abs(Date.parse(message.time) - Date.parse(status.stopped_by.event.time)) < 100, `${message.time} and ${status.stopped_by.event.time}`);
+        await fails(bridge, "robotraconteur_call_function", { service: diagnostics, name: "read_log", arguments: ["yesterday"] }, /since must be an ISO 8601 time/);
         assert.ok(log.some((e: any) => e.kind === "say" && e.text === "The show begins"));
+    });
+
+    test("a stop_when wins an event over a wait_until in the same sequence", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            service,
+            steps: [
+                { action: "stop_when", name: "ev2", condition: { d1: { $gt: 5 } }, label: "stop" },
+                // Matches any ev2, including the one stop_when watches for
+                { action: "wait_until", name: "ev2", condition: {}, timeout_s: 10, label: "answer" },
+                { action: "wait", seconds: 10 }
+            ]
+        });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [9, 0] });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "stopped", JSON.stringify(status));
+        assert.equal(status.stopped_by.event.arguments.d1, 9);
+        assert.match(status.results.find((r: any) => r.label === "answer").error, /stopped/);
     });
 
     test("stop_when halts a robot that passes a limit", async () =>
