@@ -195,3 +195,40 @@ test("help gives each page once, ignores case, and notes unknown topics without 
     assert.match(page, /# Service: `com\.robotraconteur\.uuid`/);
     assert.doesNotMatch(page, /- com\.robotraconteur\.robotics\.robot: /, "topics give only their pages");
 });
+
+test("an on_stop step's only_if can query earlier on_stop steps, but not later ones", async () =>
+{
+    const { runner: r, tools } = runner();
+    const report = await r.start([{
+        steps: [call("fails")],
+        on_stop: [call("fails", { label: "halt" }), call("quick", { label: "fallback", only_if: { "halt.ok": false } }), call("quick", { only_if: { "fallback.ok": false } })]
+    }] as SequenceSpec[], 2, "full") as { sequences: Record<string, any>[] };
+    const on_stop = report.sequences[0]!.on_stop as { label?: string; error?: string; skipped?: boolean }[];
+    assert.equal(on_stop[0]!.error, "it failed");
+    assert.equal(on_stop[1]!.skipped, undefined, "the fallback ran, since halt failed");
+    assert.equal(on_stop[2]!.skipped, true, "the last was skipped, since the fallback succeeded");
+    assert.deepEqual(tools.calls, ["fails", "fails", "quick"]);
+    await assert.rejects(r.start([{ steps: [call("quick")], on_stop: [call("quick", { only_if: { "later.ok": true } }), call("quick", { label: "later" })] }] as SequenceSpec[]),
+        /"later", which is not the label of an earlier step, or of an earlier on_stop step/);
+    await assert.rejects(r.start([{ steps: [call("quick", { label: "x" })], on_stop: [call("quick", { label: "x" }), call("quick", { only_if: { "x.ok": true } })] }] as SequenceSpec[]), /labels more than one step/);
+    await assert.rejects(r.start([{ steps: [call("quick")], on_stop: [call("quick", { label: "_sequence" })] }] as SequenceSpec[]), /_sequence is kept/);
+});
+
+test("refusals give their values and say the sequence was not started", async () =>
+{
+    const { runner: r } = runner();
+    await assert.rejects(r.start([{ steps: [call("quick", { at_s: 3, max_late_s: 2 })] }] as SequenceSpec[]), /max_late_s 2 is before the step's at_s 3\. It must be at least at_s\. The sequence was not started\./);
+    await assert.rejects(r.start([{ max_duration_s: 10, steps: [call("quick", { at_s: 3, max_late_s: 12 })] }] as SequenceSpec[]), /max_late_s 12 must be less than max_duration_s, 10\. The sequence was not started\./);
+    const many = Array.from({ length: 6 }, () => call("quick", { repeat: { count: 400, every_s: 0.01 } }));
+    await assert.rejects(r.start([{ max_duration_s: 100, steps: many }] as SequenceSpec[]), /are allowed\. The sequence was not started\./);
+});
+
+test("a sequence that times out says so in whole sentences, with second for 1", async () =>
+{
+    const { runner: r } = runner();
+    const report = await r.start([{ max_duration_s: 1, steps: [call("blocks")] }] as SequenceSpec[], 3, "full") as { sequences: Record<string, any>[] };
+    const s = report.sequences[0]!;
+    assert.equal(s.state, "timed_out");
+    assert.equal(s.error, "The sequence ran longer than max_duration_s, 1 second.");
+    assert.match(s.stopped, /which was stopped\.$/);
+});

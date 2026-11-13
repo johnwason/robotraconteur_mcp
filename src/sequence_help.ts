@@ -38,7 +38,7 @@ const HELP: Record<HelpTopic, string> = {
 - get_property (name), set_property (name, value), read_wire (name), write_wire (name, value).
 - call_function (name, arguments as an array or an object keyed by parameter name, and for a generator generator_inputs and timeout_s, default 60). Its result is the function's return value, or for a generator, how it ran and its last results.
 - read_events (name to only return those events, clear default true, limit default 50).
-- robot_move_joints (joint_position, duration_s at most 100). It lasts until the robot arrives, so to act during a motion, start a second sequence.
+- robot_move_joints (joint_position, duration_s at most 100). It lasts until the robot arrives, so to act during a motion, start a second sequence. A target outside a joint's limits is refused before the sequence starts. After it completes, the robot is left in trajectory command mode.
 - wait (seconds). noop does nothing, such as to anchor timing with at.
 - wait_until (name and condition, or watch; timeout_s), stop_when (name and condition, or watch), end_stop_when (target): see waiting and stopping.
 Arguments are fixed when the sequence starts: a step cannot use an earlier step's result, such as passing a value one step read as another step's argument. To act on a result, branch on it with only_if, or read it in the step's result and start a new sequence.
@@ -70,6 +70,7 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - Allowed: the query operators, and in $expr arithmetic, comparison, logical, conditional, type, string, and simple array operators. Refused: operators that run code ($where, $function), regular expressions, and operators that loop over or build arrays ($map, $filter, $reduce, $range).`,
 
     stopping: `- A stop_when step takes a condition like wait_until (name and condition, or watch and combine, with new_events_only and check_every_s), but does not wait. It watches in the background from that step until the sequence ends, and if the condition is met, stops the sequence as a cancel does, with state stopped and stopped_by saying what was met, at_s when it fired in sequence time, and for an event, event_to_stop_s from the event arriving to the stop. Use it to stop at once when told to, or when a robot faults, with on_stop to clean up right after. If what it watches cannot be read, it stops the sequence too.
+- A stop_when on a wire or property reads it every check_every_s, default 0.05 s, so it reacts up to that long after the value crosses its threshold, and a moving device can pass the threshold before the stop. Allow a margin, or a smaller check_every_s. Events are checked as soon as they arrive.
 - Within a sequence, an event that an active stop_when matches is held for it, so a wait_until never takes it and the stop wins. A stop_when with combine does not hold events back.
 - An end_stop_when step ends a stop_when early, so that it only covers the steps between the two: target is the label of the stop_when to end, or leave it out to end them all.
 - A stop_when step only watches while its own sequence runs, and on_stop only runs for its own sequence. To stop all the sequences of a call together, give the call a stop_when, next to sequences, rather than one in each sequence, which would only stop the first to take the event. The call's stop_when watches from the moment the call starts the sequences until all have ended, stops every sequence still running, and holds back the events it matches from the wait_until steps of all the sequences.
@@ -82,13 +83,14 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - They run in order, each even if another fails, within 10 seconds in all, at most 20 steps.
 - They cannot wait: no wait, wait_until, stop_when, end_stop_when, or robot_move_joints, and no at_s, after, at, max_late, max_late_s, or repeat.
 - Their results are given in on_stop.
+- Their only_if can query the labels of the main steps and of earlier on_stop steps, such as { "halt.ok": false } to run a fallback only if the on_stop step labelled halt failed.
 - Their only_if can also query _sequence, how the sequence ended: { state, stopped_by, error }, with state stopped, cancelled, timed_out, or failed, such as { "_sequence.state": "cancelled" } or { "_sequence.stopped_by.label": "stop" }. stopped_by is there only when the sequence was stopped by a condition or stop_together, and error only after a timeout or a failure, so after a cancel neither is, and $exists tells them apart, such as { "_sequence.stopped_by": { "$exists": false } }. A step without only_if runs however it ended.`,
 
     skipping: `only_if on a step runs it only if a MongoDB query holds, and otherwise skips it completely, giving skipped in its result.
 - It queries the outcomes of earlier labelled steps by label, each { ok, skipped, result, error }: such as { "answer.ok": true } to run only if the step labelled answer succeeded, { "answer.ok": false } only if it failed (which needs continue_on_error on that step so that the sequence goes on), or { "answer.result.event.arguments.message": "yes" } on what it returned. To act on a value, read it in an earlier labelled step, such as get_property.
 - It is decided as soon as the step comes up, before any wait for its at_s or after time, so a skipped step does not wait, does not hold up the steps after it, and none of its repeats run.
 - A skipped step counts as finished when it was skipped, so after on it times from then. To time a step from whichever branch ran, use after on the step both branches follow, such as the wait_until they depend on.
-- In on_stop steps it can also query _sequence (see on_stop). There is no other branching: no else, no loops, no jumps.`,
+- In on_stop steps it can also query _sequence and earlier on_stop steps (see on_stop). There is no other branching: no else, no loops, no jumps.`,
 
     events: `- Events are collected once a service has been used by any tool, including robotraconteur_describe, so earlier ones are not seen.
 - An event that wait_until or stop_when matches is returned in its result and removed from what robotraconteur_read_events returns.

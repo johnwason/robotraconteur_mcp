@@ -182,12 +182,10 @@ const MAX_STATUS_RESULTS = 200;
 const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "robot_move_joints"];
 /** The most things one wait_until step can watch */
 const MAX_WATCH = 10;
-/** The most of each value shown when a wait_until with watch times out */
-const WATCH_VALUE_CHARS = 300;
+/** The most of each value shown when a wait_until times out */
+const VALUE_CHARS = 300;
 /** How often wait_until reads its value unless the step says otherwise */
 const DEFAULT_CHECK_EVERY_S = 0.05;
-/** The most of the last value shown when a wait_until times out */
-const LAST_VALUE_CHARS = 1000;
 /** A step that starts later than its time by more than this reports how late it was. Less is timer jitter */
 const LATE_REPORTED_S = 0.02;
 
@@ -318,6 +316,7 @@ const HELP_FOR_ERROR: [RegExp, string][] = [
     [/only_if/, "skipping"],
     [/on_stop/, "on_stop"],
     [/\bat_s\b|max_late|\bafter (must|cannot)|cannot tell which one is meant|\bat, |\bat is an absolute|ISO 8601 time/, "timing"],
+    [/outside its limits/, "actions"],
     [/\bwatch\b|combine|timeout_s/, "waiting"],
     [/stop_when|\btarget\b/, "stopping"],
     [/action needs|joint_position|repeat|limit must/, "actions"]
@@ -327,6 +326,12 @@ function withHelpTopic(message: string): string
 {
     const topic = HELP_FOR_ERROR.find(([re]) => re.test(message))?.[1];
     return topic ? `${message} See robotraconteur_help topic ${topic}.` : message;
+}
+
+/** A number of seconds, as text: "1 second", "2.5 seconds" */
+function secondsText(n: number): string
+{
+    return `${n} ${n === 1 ? "second" : "seconds"}`;
 }
 
 /** The key an on_stop step's only_if uses for how the sequence ended */
@@ -353,7 +358,7 @@ function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceSte
             if (on_stop) continue;
             throw new Error(`only_if uses ${SEQUENCE_KEY}, which only on_stop steps can use, since it says how the sequence ended.`);
         }
-        if (!earlier.some((s) => s.label === label)) throw new Error(`only_if uses "${label}", which is not the label of an earlier step. It queries earlier labelled steps by label, such as { "${label}.ok": true }.`);
+        if (!earlier.some((s) => s.label === label)) throw new Error(`only_if uses "${label}", which is not the label of an earlier step${on_stop ? ", or of an earlier on_stop step" : ""}. It queries earlier labelled steps by label, such as { "${label}.ok": true }.`);
         if (all.filter((s) => s.label === label).length > 1) throw new Error(`only_if uses "${label}", which labels more than one step. Give the steps different labels.`);
     }
 }
@@ -606,7 +611,7 @@ export class SequenceRunner
         const with_service = (s: SequenceStep) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s;
         const steps = given_steps.map(with_service);
         const on_stop = given_on_stop.map(with_service);
-        if (on_stop.length > MAX_ON_STOP) throw new Error(`on_stop can have at most ${MAX_ON_STOP} steps`);
+        if (on_stop.length > MAX_ON_STOP) throw new Error(`on_stop can have at most ${MAX_ON_STOP} steps. The sequence was not started.`);
         for (const [i, step] of on_stop.entries())
         {
             const where = `on_stop[${i}] (${[step.action, step.label ?? step.name].filter((x) => x).join(" ")})`;
@@ -615,7 +620,9 @@ export class SequenceRunner
             if (timing.length > 0) throw new Error(`${where}: on_stop steps run at once and in order, each even if another fails, so they cannot use ${timing.join(", ")}. The sequence was not started.`);
             try
             {
-                if (step.only_if !== undefined) checkOnlyIf(step.only_if, steps, steps, true);
+                if (step.label === SEQUENCE_KEY) throw new Error(`The label ${SEQUENCE_KEY} is kept for on_stop's only_if. Use another label.`);
+                // An on_stop step's only_if can query the main steps, and the on_stop steps before it
+                if (step.only_if !== undefined) checkOnlyIf(step.only_if, [...steps, ...on_stop.slice(0, i)], [...steps, ...on_stop], true);
                 await this.check(step, SEQUENCE_LIMITS.maxDuration);
             }
             catch (e)
@@ -623,9 +630,9 @@ export class SequenceRunner
                 throw new Error(`${where}: ${errorText(e)} The sequence was not started.`);
             }
         }
-        if (steps.length === 0) throw new Error("A sequence needs at least one step");
-        if (steps.length > SEQUENCE_LIMITS.maxSteps) throw new Error(`A sequence can have at most ${SEQUENCE_LIMITS.maxSteps} steps`);
-        if (!(max_duration_s > 0) || max_duration_s > SEQUENCE_LIMITS.maxDuration) throw new Error(`max_duration_s must be more than 0 and at most ${SEQUENCE_LIMITS.maxDuration}`);
+        if (steps.length === 0) throw new Error("A sequence needs at least one step. The sequence was not started.");
+        if (steps.length > SEQUENCE_LIMITS.maxSteps) throw new Error(`A sequence can have at most ${SEQUENCE_LIMITS.maxSteps} steps. The sequence was not started.`);
+        if (!(max_duration_s > 0) || max_duration_s > SEQUENCE_LIMITS.maxDuration) throw new Error(`max_duration_s must be more than 0 and at most ${SEQUENCE_LIMITS.maxDuration}. The sequence was not started.`);
 
         let runs = 0;
         for (const [i, step] of steps.entries())
@@ -654,7 +661,7 @@ export class SequenceRunner
                 throw new Error(`${describeStep(step, i)}: ${errorText(e)} The sequence was not started.`);
             }
         }
-        if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed`);
+        if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed. The sequence was not started.`);
         checkDeadlines(steps);
 
         // stop_when watches are prepared now, so that they start at once and do not delay the steps after them
@@ -674,7 +681,7 @@ export class SequenceRunner
         sequence.prepared_watches = p.watches;
         this.sequences.set(sequence.id, sequence);
         this.forgetOld();
-        const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${p.max_duration_s} seconds`)), p.max_duration_s * 1000);
+        const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${secondsText(p.max_duration_s)}.`)), p.max_duration_s * 1000);
         sequence.done = this.run(sequence).finally(() => clearTimeout(timeout));
         return sequence;
     }
@@ -775,7 +782,8 @@ export class SequenceRunner
         {
             if (step.at !== undefined) throw new Error("max_late_s counts like at_s, so it cannot be used with at. Use max_late, an absolute time, with at.");
             if (step.max_late !== undefined) throw new Error("Give max_late or max_late_s, not both.");
-            if (!(step.max_late_s >= (step.at_s ?? 0) && step.max_late_s < max_duration_s)) throw new Error("max_late_s cannot be before the step's at_s, and must be less than max_duration_s.");
+            if (!(step.max_late_s >= (step.at_s ?? 0))) throw new Error(`max_late_s ${step.max_late_s} is before the step's at_s ${step.at_s ?? 0}. It must be at least at_s.`);
+            if (!(step.max_late_s < max_duration_s)) throw new Error(`max_late_s ${step.max_late_s} must be less than max_duration_s, ${max_duration_s}.`);
         }
         if (step.repeat)
         {
@@ -1155,16 +1163,16 @@ export class SequenceRunner
         };
         if (!step.watch)
         {
-            if (kinds[0] === "event") return `No ${step.name} event matching the condition arrived within ${step.timeout_s} seconds.${passed(ignored[0]!)}`;
-            return `The condition was not met within ${step.timeout_s} seconds. The last value of ${step.name} was ${shown(outcomes[0]!.value, LAST_VALUE_CHARS)}`;
+            if (kinds[0] === "event") return `No ${step.name} event matching the condition arrived within ${secondsText(step.timeout_s!)}.${passed(ignored[0]!)}`;
+            return `The condition was not met within ${secondsText(step.timeout_s!)}. The last value of ${step.name} was ${shown(outcomes[0]!.value, VALUE_CHARS)}.`;
         }
         const each = watches.map((w, i) =>
         {
             const o = outcomes[i]!;
             if (kinds[i] === "event") return `${w.key}: ${o.matched ? "a matching event is waiting" : `no matching ${w.name} event`}${ignored[i] ? ` (${ignored[i]} earlier ignored because of new_events_only)` : ""}`;
-            return `${w.key}: ${o.matched ? "met" : "not met"}, last value ${shown(o.value, WATCH_VALUE_CHARS)}`;
+            return `${w.key}: ${o.matched ? "met" : "not met"}, last value ${shown(o.value, VALUE_CHARS)}`;
         });
-        return `The ${step.combine ? "combined condition" : "conditions"} ${step.combine ? "was" : "were"} not met within ${step.timeout_s} seconds. ${each.join("; ")}`;
+        return `The ${step.combine ? "combined condition" : "conditions"} ${step.combine ? "was" : "were"} not met within ${secondsText(step.timeout_s!)}. ${each.join("; ")}.`;
     }
 
     private async run(sequence: Sequence): Promise<void>
@@ -1311,7 +1319,7 @@ export class SequenceRunner
     private async runOnStop(sequence: Sequence): Promise<void>
     {
         const controller = new AbortController();
-        const limit = setTimeout(() => controller.abort(new Error(`on_stop ran longer than ${ON_STOP_LIMIT_S} seconds, so its remaining steps were not run`)), ON_STOP_LIMIT_S * 1000);
+        const limit = setTimeout(() => controller.abort(new Error(`on_stop ran longer than ${secondsText(ON_STOP_LIMIT_S)}, so its remaining steps were not run.`)), ON_STOP_LIMIT_S * 1000);
         sequence.on_stop_results = [];
         try
         {
@@ -1319,10 +1327,16 @@ export class SequenceRunner
             {
                 const started = sequence.elapsed;
                 const entry: StepResult = { step: i, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
+                // An on_stop step's outcome can be queried by the only_if of the on_stop steps after it
+                const keep = () =>
+                {
+                    sequence.on_stop_results!.push(entry);
+                    if (step.label !== undefined) sequence.outcomes.set(step.label, { ok: entry.error === undefined && !entry.skipped, skipped: entry.skipped === true, result: entry.result, error: entry.error });
+                };
                 if (step.only_if !== undefined && !onlyIf(sequence, step.only_if, true))
                 {
                     entry.skipped = true;
-                    sequence.on_stop_results.push(entry);
+                    keep();
                     continue;
                 }
                 try
@@ -1336,7 +1350,7 @@ export class SequenceRunner
                     entry.error = errorText(e);
                 }
                 entry.duration_s = round(sequence.elapsed - started);
-                sequence.on_stop_results.push(entry);
+                keep();
             }
         }
         finally
@@ -1388,7 +1402,7 @@ export class SequenceRunner
         {
             const s = sequence.steps[at.step]!;
             const which = `step ${at.step}${at.iteration !== undefined ? ` run ${at.iteration}` : ""} (${s.label ?? s.action})`;
-            const where = at.waiting ? `Between steps: no step was running, though a motion that an earlier step started without waiting may still be. ${which} was waiting for its time and did not start` : `During ${which}, which was stopped`;
+            const where = at.waiting ? `Between steps: no step was running, though a motion that an earlier step started without waiting may still be. ${which} was waiting for its time and did not start.` : `During ${which}, which was stopped.`;
             report.stopped = sequence.state === "stopped" && sequence.stop_message && sequence.stopped_by?.error === undefined ? `${sequence.stop_message}. ${where}` : where;
         }
         if (sequence.stopped_by) report.stopped_by = sequence.stopped_by;

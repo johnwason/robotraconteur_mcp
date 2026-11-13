@@ -162,7 +162,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name)));
 
     server.registerTool("robotraconteur_robot_move_joints", {
-        description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position. " + PARALLEL_NOTE,
+        description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position. A target outside a joint's limits in robot_info is refused before the robot moves. After the motion completes, the robot is left in trajectory command mode; if it fails or is stopped, the robot is halted. " + PARALLEL_NOTE,
         inputSchema: z.object({
             service,
             object,

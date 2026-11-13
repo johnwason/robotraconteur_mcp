@@ -445,6 +445,9 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
 
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
         await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0], duration_s: 1 }, /has 6 joints but 2/);
+        assert.equal(moved.count, undefined, "the waypoint count is not reported");
+        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 2.5, 0, 0, 0, 0], duration_s: 1 }, /joint_2 \(joint 1\) has a target of 2\.5, outside its limits of -1\.745 to 2\.269/);
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ service, steps: [{ action: "robot_move_joints", joint_position: [0, 0, 0, 0, 0, 7], duration_s: 1 }] }] }, /joint_6 \(joint 5\) has a target of 7, outside its limits.*The sequence was not started\. See robotraconteur_help topic actions\./);
         await fails(bridge, "robotraconteur_robot_move_joints", { service: "reynard", joint_position: [0], duration_s: 1 }, /needs a standard robot, com\.robotraconteur\.robotics\.robot\.Robot, .* but this is experimental\.reynard_the_robot\.Reynard/);
 
         // The other robot was not moved
@@ -1190,7 +1193,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const get = { action: "get_property", service: "reynard", name: "color" };
         await failsStart({ steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late_s: 1 }] }, /cannot be used with at/);
         await failsStart({ steps: [{ ...get, at_s: 1, max_late: new Date(Date.now() + 5000).toISOString(), max_late_s: 2 }] }, /not both/);
-        await failsStart({ steps: [{ ...get, at_s: 1, max_late_s: 0.5 }] }, /max_late_s cannot be before the step's at_s/);
+        await failsStart({ steps: [{ ...get, at_s: 1, max_late_s: 0.5 }] }, /max_late_s 0.5 is before the step's at_s 1/);
         await failsStart({ steps: [{ action: "noop", seconds: 1 }] }, /The noop action does not use seconds/);
     });
 

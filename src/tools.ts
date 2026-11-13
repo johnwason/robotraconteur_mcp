@@ -47,6 +47,30 @@ function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinit
     throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use robotraconteur_describe to list its members.`);
 }
 
+/** The parts of a standard robot's robot_info that robot_move_joints uses */
+interface RobotInfo
+{
+    joint_info: { joint_identifier?: { name?: string } | null; joint_limits?: { lower?: number; upper?: number } | null }[];
+}
+
+/**
+ * Refuse a target with the wrong joint count, or outside a joint's limits, before anything moves. A
+ * joint whose limits are not given, both zero, or not lower below upper, is not checked
+ */
+function checkJointTarget(info: RobotInfo, target: number[]): void
+{
+    if (info.joint_info.length !== target.length) throw new Error(`The robot has ${info.joint_info.length} joints but ${target.length} positions were given.`);
+    for (const [i, j] of info.joint_info.entries())
+    {
+        const { lower, upper } = j.joint_limits ?? {};
+        if (typeof lower !== "number" || typeof upper !== "number" || !(lower < upper)) continue;
+        const value = target[i]!;
+        if (value >= lower && value <= upper) continue;
+        const name = j.joint_identifier?.name ? `${j.joint_identifier.name} (joint ${i})` : `Joint ${i}`;
+        throw new Error(`${name} has a target of ${value}, outside its limits of ${lower} to ${upper} from robot_info.joint_info. Give a target within the limits.`);
+    }
+}
+
 /** robot_move_joints needs a standard robot. Says which type is needed and what the service is instead */
 function robotMember(stub: ServiceStub): MemberDefinition
 {
@@ -161,8 +185,7 @@ export class BridgeTools
             // The joint count is checked now, so that a wrong one fails before anything moves
             if (Array.isArray(value))
             {
-                const info = await stub.getProperty("robot_info") as { joint_info: unknown[] };
-                if (info.joint_info.length !== value.length) throw new Error(`The robot has ${info.joint_info.length} joints but ${value.length} positions were given.`);
+                checkJointTarget(await stub.getProperty("robot_info") as RobotInfo, value as number[]);
             }
             return;
         }
@@ -248,7 +271,7 @@ export class BridgeTools
             if (Date.now() > deadline)
             {
                 await stub.callFunctionGenAbort(handle);
-                return { completed: false, reason: `Aborted after ${timeout_s} seconds`, count, results };
+                return { completed: false, reason: `Aborted after ${timeout_s} ${timeout_s === 1 ? "second" : "seconds"}`, count, results };
             }
             if (handle.paramType && inputs && i >= inputs.length)
             {
@@ -407,10 +430,11 @@ export class BridgeTools
 
         const state = async () => (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array };
         const start = Array.from((await state()).joint_position);
-        if (target.length !== start.length) throw new Error(`The robot has ${start.length} joints but ${target.length} positions were given`);
+        if (target.length !== start.length) throw new Error(`The robot has ${start.length} joints but ${target.length} positions were given.`);
 
-        const info = await stub.getProperty("robot_info") as { joint_info: { joint_identifier: { name: string } }[] };
-        const joint_names = info.joint_info.map((j) => j.joint_identifier.name);
+        const info = await stub.getProperty("robot_info") as RobotInfo;
+        checkJointTarget(info, target);
+        const joint_names = info.joint_info.map((j) => j.joint_identifier?.name ?? "");
 
         const steps = Math.max(4, Math.ceil(duration_s / WAYPOINT_SPACING_S));
         const waypoints = Array.from({ length: steps + 1 }, (_, i) =>
@@ -430,7 +454,7 @@ export class BridgeTools
         await stub.setProperty("command_mode", COMMAND_MODE_HALT);
         await sleep(100);
         // Once in trajectory mode, the robot is halted whenever the motion does not complete: when it is
-        // stopped, fails, or runs out of time, so it is never left in trajectory mode
+        // stopped, fails, or runs out of time. After a motion that completes, it is left in trajectory mode
         const halt = () => stub.setProperty("command_mode", COMMAND_MODE_HALT).catch(() => undefined);
         const limit_s = duration_s + 30;
         let run: Record<string, unknown>;
@@ -449,8 +473,8 @@ export class BridgeTools
         if (run.completed !== true)
         {
             await halt();
-            throw new Error(`The robot did not finish the motion within ${limit_s} seconds, so it was aborted and the robot halted.`);
+            throw new Error(`The robot did not finish the motion within ${limit_s} ${limit_s === 1 ? "second" : "seconds"}, so it was aborted and the robot halted.`);
         }
-        return { ...run, results: undefined, start, target, final_position: Array.from((await state()).joint_position) };
+        return { ...run, results: undefined, count: undefined, start, target, final_position: Array.from((await state()).joint_position) };
     }
 }

@@ -342,7 +342,7 @@ export class Codec
             const found = e.values.find((x) => x.name === raw) ?? e.values.find((x) => x.name.toLowerCase() === raw.toLowerCase());
             if (found) return found.value;
         }
-        throw new CodecError(path, `${JSON.stringify(v)} is not a value of ${e.name}. Use one of: ${e.values.map((x) => x.name).join(", ")}`);
+        throw new CodecError(path, `${JSON.stringify(v)} is not a value of ${e.name}. Use one of: ${e.values.map((x) => x.name).join(", ")}.`);
     }
 
     private varValueFromJson(v: unknown, scope: ServiceDefinition, path: string): unknown
