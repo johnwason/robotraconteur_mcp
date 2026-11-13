@@ -168,8 +168,24 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("offers a fixed list of tools", async () =>
     {
         const { tools } = await bridge.listTools();
-        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_start_sequence", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
+        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_start_sequence", "robotraconteur_sequence_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
         for (const t of tools) assert.ok((t.description?.length ?? 0) > 20, t.name);
+        // The tool list is loaded on every turn, so the detailed sequence rules are in robotraconteur_sequence_help
+        const size = (name: string) => JSON.stringify(tools.find((t) => t.name === name)).length;
+        assert.ok(size("robotraconteur_start_sequence") < 13000, `start_sequence is ${size("robotraconteur_start_sequence")} characters`);
+        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 28000, "the whole tool list");
+    });
+
+    test("sequence help gives the rules by topic", async () =>
+    {
+        const all = await call(bridge, "robotraconteur_sequence_help", {});
+        const text = all.content[0]!.text;
+        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"]) assert.match(text, new RegExp(`## ${topic}\n`));
+        const timing = (await call(bridge, "robotraconteur_sequence_help", { topics: ["timing"] })).content[0]!.text;
+        assert.match(timing, /max_late_s, counted as at_s is, defaults to at_s/);
+        assert.doesNotMatch(timing, /## events/);
+        const bad = await call(bridge, "robotraconteur_sequence_help", { topics: ["nope"] });
+        assert.equal(bad.isError, true);
     });
 
     test("finds services and gives them usable names", async () =>
