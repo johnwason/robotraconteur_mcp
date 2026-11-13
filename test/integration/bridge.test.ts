@@ -121,6 +121,13 @@ async function failsStart(args: Record<string, unknown>, expected: RegExp): Prom
     await fails(bridge, "robotraconteur_start_sequence", oneSequence(args), expected);
 }
 
+/** Cancel one sequence and return its report */
+async function cancelSeq(sequence_id: string): Promise<any>
+{
+    const r = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_ids: [sequence_id] });
+    return r.sequences[0];
+}
+
 async function discover(client: Client, wanted: string[]): Promise<any[]>
 {
     const deadline = Date.now() + 45000;
@@ -668,7 +675,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(running.state, "running");
         assert.equal(running.current_step.action, "robot_move_joints");
 
-        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        const cancelled = await cancelSeq(sequence_id);
         assert.equal(cancelled.state, "cancelled");
         assert.match(cancelled.results[0].error, /cancelled/);
         assert.match(cancelled.stopped, /^During step 0 \(robot_move_joints\), which was stopped/);
@@ -685,12 +692,12 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
         // The robot is free for the next motion
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
-        await fails(bridge, "robotraconteur_cancel_sequence", { sequence_id: "seq-0" }, /Unknown sequence "seq-0"/);
-        const again = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        await fails(bridge, "robotraconteur_cancel_sequence", { sequence_ids: ["seq-0"] }, /Unknown sequence "seq-0"/);
+        const again = await cancelSeq(sequence_id);
         assert.match(again.cancel, /already been cancelled before this cancel, so nothing was cancelled/);
         const done = await startSeq({ wait_s: 5, steps: [{ action: "wait", seconds: 0.1 }] });
         assert.equal(done.state, "completed");
-        const late = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id: done.sequence_id });
+        const late = await cancelSeq(done.sequence_id);
         assert.equal(late.state, "completed");
         assert.match(late.cancel, /The sequence had already completed before this cancel, so nothing was cancelled\. The cancel arrived [\d.]+ s after it ended, [\d.]+ s into the sequence/);
     });
@@ -727,7 +734,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(running.state, "running", JSON.stringify(running));
         assert.equal(running.current_step.label, "trajectory", JSON.stringify(running));
 
-        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        const cancelled = await cancelSeq(sequence_id);
         assert.equal(cancelled.state, "cancelled");
         assert.equal(cancelled.results[0].label, "trajectory");
         assert.match(cancelled.results[0].error, /cancelled/);
@@ -750,7 +757,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const waiting = await ok(bridge, "robotraconteur_sequence_status", { sequence_id });
         assert.deepEqual({ step: waiting.current_step.step, waiting: waiting.current_step.waiting, starts_at_s: waiting.current_step.starts_at_s }, { step: 1, waiting: true, starts_at_s: 2 });
 
-        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        const cancelled = await cancelSeq(sequence_id);
         assert.equal(cancelled.state, "cancelled");
         assert.match(cancelled.stopped, /^Between steps: no step was running, though a motion that an earlier step started without waiting may still be\. step 1 \(say 1\) was waiting for its time and did not start/);
         assert.equal(cancelled.error, undefined, "a cancel is not an error");
@@ -861,7 +868,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const on_stop = [{ action: "get_property", name: "color" }];
         const { sequence_id } = await startSeq({ service: "reynard", steps: [{ action: "wait", seconds: 20 }], on_stop });
         await new Promise((resolve) => setTimeout(resolve, 300));
-        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        const cancelled = await cancelSeq(sequence_id);
         assert.equal(cancelled.state, "cancelled");
         assert.equal(cancelled.on_stop.length, 1, "cancel returns after on_stop has run");
         assert.ok(Array.isArray(cancelled.on_stop[0].result));
@@ -923,7 +930,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
         const cancelled = await startSeq({ steps, on_stop });
         await new Promise((resolve) => setTimeout(resolve, 300));
-        assert.deepEqual(ran(await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id: cancelled.sequence_id })), ["by_cancel", "always"]);
+        assert.deepEqual(ran(await cancelSeq(cancelled.sequence_id)), ["by_cancel", "always"]);
 
         const get = { action: "get_property", service: "reynard", name: "color" };
         await failsStart({ steps: [{ ...get, only_if: { "_sequence.state": "failed" } }] }, /only on_stop steps can use/);
@@ -1173,6 +1180,51 @@ describe("timed sequences", { timeout: 300000 }, () =>
             { action: "noop", label: "mark" }, { ...get, after: "mark", at_s: 0.1 }
         ] });
         assert.equal(fine.state, "completed", JSON.stringify(fine));
+    });
+
+    test("a call's stop_when stops all its sequences, and wins its event", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const on_stop = [{ action: "get_property", service: "reynard", name: "color", label: "cleanup", only_if: { "_sequence.stopped_by.label": "show_stop" } }];
+        const started = await ok(bridge, "robotraconteur_start_sequence", {
+            stop_when: { label: "show_stop", service, name: "ev2", condition: { d1: { $gt: 5 } } },
+            sequences: [
+                { label: "a", service: "reynard", steps: [{ action: "wait", seconds: 10 }], on_stop },
+                // Would take any ev2, but the call's stop_when gets the one it matches
+                { label: "b", service, steps: [{ action: "wait_until", name: "ev2", condition: {}, timeout_s: 10, label: "listen" }, { action: "wait", seconds: 10 }], on_stop },
+                { label: "done", service: "reynard", steps: [{ action: "get_property", name: "color" }] }
+            ]
+        });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [9, 0] });
+        const reports = await Promise.all(started.sequences.map((s: any) => (async () =>
+        {
+            let r = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: s.sequence_id, wait_s: 10 });
+            while (r.state === "running") r = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: s.sequence_id, wait_s: 10 });
+            return r;
+        })()));
+        const [a, b, done] = reports;
+        assert.equal(a.state, "stopped", JSON.stringify(a));
+        assert.equal(b.state, "stopped", JSON.stringify(b));
+        assert.equal(done.state, "completed", "a sequence that had already ended is left alone");
+        for (const r of [a, b])
+        {
+            assert.equal(r.stopped_by.stop_when, "call");
+            assert.equal(r.stopped_by.event.arguments.d1, 9);
+            assert.ok(r.stopped_by.event_to_stop_s < 0.05, String(r.stopped_by.event_to_stop_s));
+            assert.ok(Array.isArray(r.on_stop[0].result), "each ran its own on_stop, which saw the call's stop");
+        }
+        assert.match(b.results.find((r: any) => r.label === "listen").error, /stopped by the call's stop_when \(show_stop\)/);
+        await fails(bridge, "robotraconteur_start_sequence", { stop_when: { service, name: "ev2", condition: {}, at_s: 1 }, sequences: [{ service: "reynard", steps: [{ action: "noop" }] }] }, /at_s/);
+    });
+
+    test("cancel_sequence cancels several sequences at once", async () =>
+    {
+        const started = await ok(bridge, "robotraconteur_start_sequence", { sequences: [{ service: "reynard", steps: [{ action: "wait", seconds: 10 }] }, { service: "reynard", steps: [{ action: "wait", seconds: 10 }] }] });
+        const ids = started.sequences.map((s: any) => s.sequence_id);
+        await fails(bridge, "robotraconteur_cancel_sequence", { sequence_ids: [ids[0], "seq-0"] }, /Unknown sequence "seq-0"/);
+        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_ids: ids });
+        assert.deepEqual(cancelled.sequences.map((s: any) => s.state), ["cancelled", "cancelled"]);
     });
 
     test("a sequence that runs past max_duration_s is stopped", async () =>
@@ -1440,7 +1492,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         });
         await new Promise((resolve) => setTimeout(resolve, 300));
         const started = Date.now();
-        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        const cancelled = await cancelSeq(sequence_id);
         assert.equal(cancelled.state, "cancelled");
         assert.ok(Date.now() - started < 1000, "the wait stops promptly");
     });

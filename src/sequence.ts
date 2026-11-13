@@ -52,6 +52,22 @@ interface PreparedSequence
     on_stop: SequenceStep[];
     max_duration_s: number;
     runs: number;
+    /** The watches of its stop_when steps, by step index, ready to start at once */
+    watches: Map<number, PreparedWatch>;
+}
+
+/** The stop_when of a whole start_sequence call, which stops all its sequences */
+export interface CallStopWhen
+{
+    label?: string;
+    service?: string;
+    object?: string;
+    name?: string;
+    condition?: Record<string, unknown>;
+    watch?: WatchEntry[];
+    combine?: Record<string, unknown>;
+    new_events_only?: boolean;
+    check_every_s?: number;
 }
 
 /** A wait_until or stop_when step's watch, compiled and ready to check */
@@ -398,7 +414,10 @@ class Sequence
     stopped_by?: Record<string, unknown>;
     stop_message?: string;
     /** The stop_when steps started, by step index, and whether each is still watching */
+    /** The stop_when steps started, by step index, and whether each is still watching. A call's stop_when has index -1 */
     readonly monitors = new Map<number, { label?: string; active: boolean; watch: PreparedWatch }>();
+    /** The watches of its stop_when steps, prepared when the sequence was checked */
+    prepared_watches = new Map<number, PreparedWatch>();
     total_runs = 0;
     /** Repeats of skipped steps, which have one result for all their runs */
     skipped_runs = 0;
@@ -447,7 +466,7 @@ export class SequenceRunner
      * used by its steps that do not name one. With wait_s, waits up to that long for them all to
      * finish, and reports each as status does
      */
-    async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact"): Promise<Record<string, unknown>>
+    async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact", call_stop?: CallStopWhen): Promise<Record<string, unknown>>
     {
         if (specs.length === 0) throw new Error("Give at least one sequence in sequences.");
         const running = [...this.sequences.values()].filter((s) => s.state === "running").length;
@@ -469,8 +488,27 @@ export class SequenceRunner
             }
         }
 
+        // The call's stop_when is checked with the rest, and ready before the clock starts
+        let call_watch: PreparedWatch | undefined;
+        if (call_stop !== undefined)
+        {
+            const step: SequenceStep = { action: "stop_when", ...call_stop };
+            try
+            {
+                const fields = Object.keys(call_stop).filter((k) => k !== "label" && !ACTION_FIELDS.stop_when.includes(k as keyof SequenceStep));
+                if (fields.length > 0) throw new Error(`It does not use ${fields.join(", ")}.`);
+                await this.check(step, SEQUENCE_LIMITS.maxDuration);
+                call_watch = await this.prepareWatch(step);
+            }
+            catch (e)
+            {
+                throw new Error(`stop_when: ${errorText(e)} No sequence was started.`);
+            }
+        }
+
         const clock = { started: new Date(), t0: performance.now() };
         const sequences = prepared.map((p) => this.launch(p, clock));
+        if (call_watch) this.startCallMonitor(sequences, call_watch);
         if (wait_s > 0)
         {
             let timer: ReturnType<typeof setTimeout> | undefined;
@@ -549,7 +587,13 @@ export class SequenceRunner
         if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed`);
         checkDeadlines(steps);
 
-        return { label: spec.label, steps, on_stop, max_duration_s, runs };
+        // stop_when watches are prepared now, so that they start at once and do not delay the steps after them
+        const watches = new Map<number, PreparedWatch>();
+        for (const [i, step] of steps.entries())
+        {
+            if (step.action === "stop_when") watches.set(i, await this.prepareWatch(step));
+        }
+        return { label: spec.label, steps, on_stop, max_duration_s, runs, watches };
     }
 
     /** Start a checked sequence on a clock shared with the others started in the same call */
@@ -557,6 +601,7 @@ export class SequenceRunner
     {
         const sequence = new Sequence(`seq-${this.next_id++}`, p.steps, p.max_duration_s, p.on_stop, p.label, clock);
         sequence.total_runs = p.runs;
+        sequence.prepared_watches = p.watches;
         this.sequences.set(sequence.id, sequence);
         this.forgetOld();
         const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${p.max_duration_s} seconds`)), p.max_duration_s * 1000);
@@ -576,6 +621,15 @@ export class SequenceRunner
             clearTimeout(timer);
         }
         return this.report(sequence, from_index, detail);
+    }
+
+    /** Stop several sequences at once, such as all those of one start call, and report each in order */
+    async cancelMany(ids: string[]): Promise<Record<string, unknown>>
+    {
+        if (ids.length === 0) throw new Error("Give at least one sequence_id.");
+        // Every id is checked first, so that an unknown one cancels nothing
+        for (const id of ids) this.get(id);
+        return { sequences: await Promise.all(ids.map((id) => this.cancel(id))) };
     }
 
     /** Stop a sequence. A robot motion it started is aborted and the robot halted */
@@ -817,7 +871,7 @@ export class SequenceRunner
         const ended: string[] = [];
         for (const [index, m] of sequence.monitors)
         {
-            if (!m.active || (step.target !== undefined && m.label !== step.target)) continue;
+            if (index < 0 || !m.active || (step.target !== undefined && m.label !== step.target)) continue;
             m.active = false;
             ended.push(m.label ?? `steps[${index}]`);
         }
@@ -827,7 +881,9 @@ export class SequenceRunner
     /** A stop_when step: start watching in the background, and go on to the next step at once */
     private async startStopWhen(sequence: Sequence, step: SequenceStep, index: number): Promise<unknown>
     {
-        this.startMonitor(sequence, step, index, await this.prepareWatch(step));
+        const prepared = sequence.prepared_watches.get(index) ?? await this.prepareWatch(step);
+        // new_events_only counts from when the step runs, not from when it was checked
+        this.startMonitor(sequence, step, index, { ...prepared, since: step.new_events_only ? Date.now() : undefined });
         return { watching: true };
     }
 
@@ -958,6 +1014,64 @@ export class SequenceRunner
                 }
                 const pause = checked + every - performance.now();
                 await (p.kinds.includes("event") ? sleepOrEvent(pause, signal, this.tools) : sleep(pause, signal)).catch(() => undefined);
+            }
+        })();
+    }
+
+    /**
+     * Watch for a call's stop_when until all of its sequences have ended, and stop every one still
+     * running when its condition is met, as a cancel does. It is a monitor of each sequence, so a
+     * wait_until in any of them leaves its events for it. If it cannot check, it stops them all
+     */
+    private startCallMonitor(sequences: Sequence[], p: PreparedWatch): void
+    {
+        const step = p.step;
+        const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
+        const monitor = { label: step.label, active: true, watch: p };
+        for (const s of sequences) s.monitors.set(-1, monitor);
+        // Ends the wait between checks once every sequence has ended
+        const ended = new AbortController();
+        void Promise.all(sequences.map((s) => s.done)).then(() => ended.abort(new Error("ended")));
+        const which = `the call's stop_when${step.label ? ` (${step.label})` : ""}`;
+        const started = performance.now();
+        const stopAll = (stopped_by: Record<string, unknown>, message: string) =>
+        {
+            for (const s of sequences)
+            {
+                if (s.state !== "running" || s.controller.signal.aborted) continue;
+                s.stopped_by = { ...stopped_by, at_s: round(s.elapsed) };
+                s.controller.abort(new SequenceStopped("stopped", message));
+            }
+        };
+        const running = () => sequences.some((s) => s.state === "running" && !s.controller.signal.aborted);
+        void (async () =>
+        {
+            while (running() && !ended.signal.aborted)
+            {
+                const checked = performance.now();
+                let result: { met: boolean; outcomes: WatchOutcome[] };
+                try
+                {
+                    result = await this.checkOnce(p);
+                }
+                catch (e)
+                {
+                    if (!running()) return;
+                    stopAll({ stop_when: "call", label: step.label, error: errorText(e) }, `${which} could not check its condition, so the sequences were stopped: ${errorText(e)}`);
+                    return;
+                }
+                if (!running()) return;
+                if (result.met)
+                {
+                    const matched = this.takeMatched(p, result.outcomes, round((performance.now() - started) / 1000));
+                    const events = result.outcomes.map((o) => o.event).filter((e) => e !== undefined);
+                    const timing: Record<string, number> = {};
+                    if (events.length > 0) timing.event_to_stop_s = round((Date.now() - Math.min(...events.map((e) => Date.parse(e!.time)))) / 1000);
+                    stopAll({ stop_when: "call", label: step.label, ...timing, ...matched }, `The sequences were stopped by ${which}, whose condition was met`);
+                    return;
+                }
+                const pause = checked + every - performance.now();
+                await (p.kinds.includes("event") ? sleepOrEvent(pause, ended.signal, this.tools) : sleep(pause, ended.signal)).catch(() => undefined);
             }
         })();
     }
