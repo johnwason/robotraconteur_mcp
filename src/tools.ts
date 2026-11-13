@@ -55,6 +55,21 @@ function robotMember(stub: ServiceStub): MemberDefinition
     throw new Error(`robot_move_joints needs a standard robot, com.robotraconteur.robotics.robot.Robot, with an execute_trajectory function, but this is ${stub.objectType}. Use robotraconteur_describe to see how to move it.`);
 }
 
+/**
+ * Wait for a request, but stop waiting as soon as the signal aborts. The request itself goes on in
+ * the service, since a plain Robot Raconteur call cannot be stopped once sent
+ */
+export function untilAborted<T>(action: Promise<T>, signal: AbortSignal): Promise<T>
+{
+    return new Promise((resolve, reject) =>
+    {
+        const stop = () => reject(signal.reason);
+        if (signal.aborted) stop();
+        signal.addEventListener("abort", stop, { once: true });
+        action.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+    });
+}
+
 function scope(stub: ServiceStub)
 {
     return stub.context.serviceDefForType(stub.objectType);
@@ -143,6 +158,12 @@ export class BridgeTools
         if (kind === "robot")
         {
             robotMember(stub);
+            // The joint count is checked now, so that a wrong one fails before anything moves
+            if (Array.isArray(value))
+            {
+                const info = await stub.getProperty("robot_info") as { joint_info: unknown[] };
+                if (info.joint_info.length !== value.length) throw new Error(`The robot has ${info.joint_info.length} joints but ${value.length} positions were given.`);
+            }
             return;
         }
         const m = member(stub, name, [kind]);
@@ -261,8 +282,21 @@ export class BridgeTools
         const converted = this.convertArguments(stub, m, args);
         // Checked before the call, because a generator that has started must be closed
         const inputs = this.convertGeneratorInputs(stub, m, generator_inputs);
-        const result = await stub.callFunction(name, converted);
         const generator = m.type?.container === "generator" || m.parameters?.some((p) => p.type.container === "generator");
+        const call = stub.callFunction(name, converted);
+        let result: unknown;
+        try
+        {
+            // A plain call can block for as long as the service takes, such as for a motion with wait,
+            // so a cancel stops waiting for it at once. The service finishes the call on its own
+            result = signal ? await untilAborted(call, signal) : await call;
+        }
+        catch (e)
+        {
+            // A generator that starts after the abort is aborted too, so it does not run unattended
+            if (generator && signal?.aborted) void call.then((h) => stub.callFunctionGenAbort(h as GeneratorHandle)).catch(() => undefined);
+            throw e;
+        }
         if (generator) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal);
         return { result: m.type?.type === "void" ? null : encode(stub, result, m.type) };
     }
@@ -289,14 +323,17 @@ export class BridgeTools
         return m.kind as "wire" | "property" | "event";
     }
 
-    /** The oldest event of this name received from a service whose arguments pass the test, left in place */
     /** Call a function whenever any service sends an event, until the returned function is called */
     onEvent(listener: () => void): () => void
     {
         return this.registry.onEvent(listener);
     }
 
-    findEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
+    /**
+     * The oldest event of this name received from a service that passes the test, left in place. The
+     * test is given the event's arguments and its time in milliseconds
+     */
+    findEvent(service: string, event: string, test: (args: Record<string, unknown>, time: number) => boolean, since?: number): ReceivedEvent | undefined
     {
         return this.registry.findEvent(service, event, test, since);
     }
@@ -349,7 +386,8 @@ export class BridgeTools
     async robotMoveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         // Starting a motion selects the command mode, which would stop one already running
-        const key = `${service}/${object ?? ""}`;
+        // By the service's full name, so that two names for one robot cannot both move it
+        const key = `${this.registry.fullServiceName(service)}/${object ?? ""}`;
         if (this.moving.has(key)) throw new Error(`${service} is already moving. Wait for that motion to finish before starting another.`);
         this.moving.add(key);
         try
@@ -391,20 +429,27 @@ export class BridgeTools
 
         await stub.setProperty("command_mode", COMMAND_MODE_HALT);
         await sleep(100);
-        await stub.setProperty("command_mode", COMMAND_MODE_TRAJECTORY);
-
-        if (signal?.aborted) throw signal.reason;
-        const generator = await stub.callFunction("execute_trajectory", [{ joint_names, joint_units: null, waypoints, extended: null }]) as GeneratorHandle;
+        // Once in trajectory mode, the robot is halted whenever the motion does not complete: when it is
+        // stopped, fails, or runs out of time, so it is never left in trajectory mode
+        const halt = () => stub.setProperty("command_mode", COMMAND_MODE_HALT).catch(() => undefined);
+        const limit_s = duration_s + 30;
         let run: Record<string, unknown>;
         try
         {
-            run = await this.runGenerator(stub, generator, undefined, duration_s + 30, signal);
+            await stub.setProperty("command_mode", COMMAND_MODE_TRAJECTORY);
+            if (signal?.aborted) throw signal.reason;
+            const generator = await stub.callFunction("execute_trajectory", [{ joint_names, joint_units: null, waypoints, extended: null }]) as GeneratorHandle;
+            run = await this.runGenerator(stub, generator, undefined, limit_s, signal);
         }
         catch (e)
         {
-            // Stopped partway, such as by cancelling a sequence. The robot must not be left in trajectory mode
-            if (signal?.aborted) await stub.setProperty("command_mode", COMMAND_MODE_HALT).catch(() => undefined);
+            await halt();
             throw e;
+        }
+        if (run.completed !== true)
+        {
+            await halt();
+            throw new Error(`The robot did not finish the motion within ${limit_s} seconds, so it was aborted and the robot halted.`);
         }
         return { ...run, results: undefined, start, target, final_position: Array.from((await state()).joint_position) };
     }

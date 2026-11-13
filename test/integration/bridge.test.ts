@@ -411,6 +411,28 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.deepEqual(other.value.joint_position, [0, 0, 0, 0, 0, 0]);
     });
 
+    test("a cancelled client call stops the robot and halts it", async () =>
+    {
+        const service = "robot_a.robot";
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        const abort = new AbortController();
+        const moving = bridge.callTool({ name: "robotraconteur_robot_move_joints", arguments: { service, joint_position: [0.5, 0, 0, 0, 0, 0], duration_s: 4 } }, { signal: abort.signal, timeout: 30000 });
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        abort.abort();
+        await assert.rejects(moving);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const mode = await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" });
+        assert.equal(mode.value.name, "halt", "the robot was halted");
+        const first = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const later = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
+        assert.ok(first > 0 && first < 0.5, `stopped partway: ${first}`);
+        assert.equal(later, first, "and stays stopped");
+        // A sequence step with the wrong joint count fails before anything runs
+        await failsStart({ steps: [{ action: "call_function", service: "reynard", name: "say", arguments: ["not said"] }, { action: "robot_move_joints", service, joint_position: [0, 0], duration_s: 1 }] }, /steps\[1\].*has 6 joints but 2/);
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+    });
+
     test("uses enums by name and reports them by name", async () =>
     {
         const service = "robot_a.robot";
@@ -979,7 +1001,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await failsStart({ steps: [{ ...get, only_if: { "nothing.ok": true } }] }, /only_if uses "nothing", which is not the label of an earlier step/);
         await failsStart({ steps: [{ ...get, only_if: { "later.ok": true } }, { ...get, label: "later" }] }, /"later", which is not the label of an earlier step/);
         await failsStart({ steps: [{ ...get, label: "x" }, { ...get, label: "x" }, { ...get, only_if: { "x.ok": true } }] }, /labels more than one step/);
-        await failsStart({ steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: The condition is not a valid MongoDB query/);
+        await failsStart({ steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: \$bogus is not allowed in a condition/);
     });
 
     test("a chat message from the diagnostics service stops a show at once, and on_stop reacts", async () =>
@@ -1218,6 +1240,30 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_start_sequence", { stop_when: { service, name: "ev2", condition: {}, at_s: 1 }, sequences: [{ service: "reynard", steps: [{ action: "noop" }] }] }, /at_s/);
     });
 
+    test("cancel stops a sequence blocked in a plain function call at once", async () =>
+    {
+        // drive_robot with wait blocks for its timeout, as a motion command with wait does
+        const { sequence_id } = await startSeq({ service: "reynard", steps: [{ action: "call_function", name: "drive_robot", arguments: [0, 0, 5, true] }] });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const t = Date.now();
+        const cancelled = await cancelSeq(sequence_id);
+        assert.ok(Date.now() - t < 1000, `the cancel took ${Date.now() - t} ms`);
+        assert.equal(cancelled.state, "cancelled");
+    });
+
+    test("a stop_when with new_events_only leaves earlier events to wait_until", async () =>
+    {
+        await ok(bridge, "robotraconteur_read_events", { service: "reynard" });
+        const report = await startSeq({ wait_s: 5, detail: "full", service: "reynard", steps: [
+            { action: "call_function", service: "reynard_diagnostics", name: "send_message", arguments: ["earlier"] },
+            { action: "wait", seconds: 0.3 },
+            { action: "stop_when", name: "new_message", condition: {}, new_events_only: true },
+            { action: "wait_until", name: "new_message", condition: { message: "earlier" }, timeout_s: 1, label: "got" }
+        ] });
+        assert.equal(report.state, "completed", JSON.stringify(report));
+        assert.equal(report.results.find((r: any) => r.label === "got").result.event.arguments.message, "earlier");
+    });
+
     test("cancel_sequence cancels several sequences at once", async () =>
     {
         const started = await ok(bridge, "robotraconteur_start_sequence", { sequences: [{ service: "reynard", steps: [{ action: "wait", seconds: 10 }] }, { service: "reynard", steps: [{ action: "wait", seconds: 10 }] }] });
@@ -1367,7 +1413,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await failsStart({ steps: [{ ...base, condition: { $where: "true" } }] }, /\$where is not allowed in a condition/);
         await failsStart({ steps: [{ ...base, condition: { $expr: { $function: { body: "x", args: [], lang: "js" } } } }] }, /\$function is not allowed/);
         await failsStart({ steps: [{ ...base, condition: { value: { $regex: "a" } } }] }, /\$regex is not allowed/);
-        await failsStart({ steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /not a valid MongoDB query: .*\$bogus/);
+        await failsStart({ steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /\$bogus is not allowed in a condition/);
+        await failsStart({ steps: [{ ...base, condition: { $expr: { $gt: [{ $size: { $range: [0, 1e9] } }, 0] } } }] }, /\$range is not allowed in a condition/);
         await failsStart({ steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {} }] }, /needs timeout_s/);
         await failsStart({ steps: [{ ...base, name: "teleport", condition: {} }] }, /"teleport" is a function, not a wire or property or event/);
     });

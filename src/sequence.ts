@@ -19,6 +19,7 @@ import { performance } from "node:perf_hooks";
 import { compileCondition } from "./condition.js";
 import { errorText } from "./errors.js";
 import type { ReceivedEvent } from "./registry.js";
+import { untilAborted } from "./tools.js";
 import type { BridgeTools } from "./tools.js";
 
 export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when", "noop"] as const;
@@ -79,7 +80,7 @@ interface PreparedWatch
     combine?: (value: unknown) => boolean;
     since?: number;
     /** Events left for a stop_when of the same sequence, which a wait_until does not take */
-    reserved?: (service: string, event: string, args: Record<string, unknown>) => boolean;
+    reserved?: (service: string, event: string, args: Record<string, unknown>, time: number) => boolean;
 }
 
 /** What one check found for one watched thing */
@@ -282,17 +283,6 @@ function sleepOrEvent(ms: number, signal: AbortSignal, tools: BridgeTools): Prom
 }
 
 /** Settle with the action, or with the abort reason as soon as the signal aborts */
-function untilAborted<T>(action: Promise<T>, signal: AbortSignal): Promise<T>
-{
-    return new Promise((resolve, reject) =>
-    {
-        const stop = () => reject(signal.reason);
-        if (signal.aborted) stop();
-        signal.addEventListener("abort", stop, { once: true });
-        action.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
-    });
-}
-
 /** The field names a combine query refers to: the first part of each field path, wherever it appears */
 function combineFields(x: unknown, out = new Set<string>()): Set<string>
 {
@@ -316,13 +306,13 @@ function combineFields(x: unknown, out = new Set<string>()): Set<string>
     return out;
 }
 
+/** The key an on_stop step's only_if uses for how the sequence ended */
+const SEQUENCE_KEY = "_sequence";
+
 /**
  * Check an only_if query: valid, and using only the labels of steps that come before, which must be
  * unique so that it is clear which step each means
  */
-/** The key an on_stop step's only_if uses for how the sequence ended */
-const SEQUENCE_KEY = "_sequence";
-
 function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceStep[], on_stop = false): void
 {
     try
@@ -450,7 +440,6 @@ class Sequence
     /** The stop_when step that stopped the sequence, and what it saw */
     stopped_by?: Record<string, unknown>;
     stop_message?: string;
-    /** The stop_when steps started, by step index, and whether each is still watching */
     /** The stop_when steps started, by step index, and whether each is still watching. A call's stop_when has index -1 */
     readonly monitors = new Map<number, { label?: string; active: boolean; watch: PreparedWatch }>();
     /** Called with each step result as it is recorded, for until */
@@ -496,11 +485,6 @@ export class SequenceRunner
 
     constructor(private tools: BridgeTools) {}
 
-    /**
-     * Check every step, then start the sequence. Nothing is done if a step is wrong. service is used
-     * by the steps that do not name one. With wait_s, waits up to that long for the sequence to finish
-     * and reports it as status does
-     */
     /**
      * Check every step of every sequence, then start them all at the same instant, on one clock, so
      * that their at_s values line up. Nothing starts if any step is wrong. Each sequence's service is
@@ -552,6 +536,10 @@ export class SequenceRunner
             }
         }
 
+        // Counted again, since other calls may have started sequences while these were checked. Nothing
+        // waits from here to the launch, so no other call can start any in between
+        const now_running = [...this.sequences.values()].filter((s) => s.state === "running").length;
+        if (now_running + specs.length > SEQUENCE_LIMITS.maxRunning) throw new Error(`${now_running} sequences are already running, and at most ${SEQUENCE_LIMITS.maxRunning} can run at once. Wait for one to finish, or cancel one with robotraconteur_cancel_sequence.`);
         const clock = { started: new Date(), t0: performance.now() };
         const sequences = prepared.map((p) => this.launch(p, clock));
         if (stop_together && sequences.length > 1) for (const s of sequences) s.together = sequences;
@@ -805,7 +793,7 @@ export class SequenceRunner
             need("joint_position");
             if (!(typeof step.duration_s === "number" && step.duration_s > 0 && step.duration_s <= 100)) throw new Error("The robot_move_joints action needs duration_s, more than 0 and at most 100.");
             if (!Array.isArray(step.joint_position) || !step.joint_position.every((x) => Number.isFinite(x))) throw new Error("joint_position must be an array of numbers.");
-            await this.tools.check(service, step.object, "robot", "");
+            await this.tools.check(service, step.object, "robot", "", step.joint_position);
             break;
         }
     }
@@ -949,7 +937,7 @@ export class SequenceRunner
             if (p.kinds[i] === "event")
             {
                 const reserved = p.reserved;
-                const test = reserved ? (args: Record<string, unknown>) => w.test(args) && !reserved(w.service, w.name, args) : w.test;
+                const test = reserved ? (args: Record<string, unknown>, time: number) => w.test(args) && !reserved(w.service, w.name, args, time) : w.test;
                 const event = this.tools.findEvent(w.service, w.name, test, p.since);
                 return { matched: event !== undefined, event };
             }
@@ -989,9 +977,11 @@ export class SequenceRunner
     private async waitUntil(step: SequenceStep, signal: AbortSignal, sequence?: Sequence): Promise<unknown>
     {
         const p = await this.prepareWatch(step);
-        // An event that a stop_when of the same sequence matches is left for it, so the stop wins
-        if (sequence) p.reserved = (service, event, args) => [...sequence.monitors.values()].some((m) =>
-            m.active && !m.watch.step.combine && m.watch.watches.some((w, i) => m.watch.kinds[i] === "event" && w.service === service && w.name === event && w.test(args)));
+        // An event that a stop_when of the same sequence matches is left for it, so the stop wins. One the
+        // stop_when ignores, received before it started with new_events_only, is not held back
+        if (sequence) p.reserved = (service, event, args, time) => [...sequence.monitors.values()].some((m) =>
+            m.active && !m.watch.step.combine && (m.watch.since === undefined || time >= m.watch.since)
+            && m.watch.watches.some((w, i) => m.watch.kinds[i] === "event" && w.service === service && w.name === event && w.test(args)));
         const started = performance.now();
         const deadline = started + step.timeout_s! * 1000;
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
@@ -1183,12 +1173,16 @@ export class SequenceRunner
                     if (latest !== undefined)
                     {
                         const deadline = latest + k * (step.repeat?.every_s ?? 0) * 1000;
+                        // In sequence time, from the wall clock read once when the sequence started, so
+                        // that a change to the system clock partway does not move deadlines
+                        const deadline_s = (deadline - sequence.started.getTime()) / 1000;
+                        const now_s = sequence.elapsed;
                         // Getting from one step to the next takes a millisecond or two, which is not lateness
-                        if (Date.now() > deadline + LATE_REPORTED_S * 1000)
+                        if (now_s > deadline_s + LATE_REPORTED_S)
                         {
-                            const came = new Date();
-                            const entry: StepResult = { step: i, iteration, action: step.action, label: step.label, started_s: round(sequence.elapsed), duration_s: 0 };
-                            entry.late_s = round((came.getTime() - deadline) / 1000);
+                            const came = new Date(sequence.started.getTime() + now_s * 1000);
+                            const entry: StepResult = { step: i, iteration, action: step.action, label: step.label, started_s: round(now_s), duration_s: 0 };
+                            entry.late_s = round(now_s - deadline_s);
                             entry.error = `It came up at ${came.toISOString()}, ${entry.late_s} s after its latest start time, ${new Date(deadline).toISOString()}, so it did not run.`;
                             record(sequence, step, entry);
                             if (!step.continue_on_error) throw new Error(`${describeStep(step, i)} failed: ${entry.error}`);

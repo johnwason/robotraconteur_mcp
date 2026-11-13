@@ -133,7 +133,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
             generator_inputs: z.array(z.unknown()).optional().describe("For a generator that takes a value at each step, the values to send"),
             timeout_s: z.number().positive().optional().describe("For a generator, abort after this many seconds. The default is 60")
         })
-    }, (a) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60)));
+    }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_read_wire", {
         description: "Read the latest value of a wire. Wires carry continuously updated data such as robot state and sensor readings.",
@@ -164,7 +164,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
             joint_position: z.array(z.number()).describe("The target position of every joint, in order"),
             duration_s: z.number().positive().max(100).describe("How long the motion should take, in seconds. The maximum is 100")
         })
-    }, (a) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s)));
+    }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_start_sequence", {
         description: `Start one or more timed sequences of steps, given in sequences, and return immediately with each one's sequence_id. The steps run in the server without a round trip through the model, so their timing is exact. Sequences started in one call start together on one clock, so their at_s and after times line up, such as to start several robots at once; the result gives each sequence in order. Actions: call_function, get_property, set_property, read_wire, write_wire, read_events, robot_move_joints, wait, wait_until, stop_when, end_stop_when, and noop, which does nothing, on one or more services.

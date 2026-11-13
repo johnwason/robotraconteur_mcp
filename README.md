@@ -47,6 +47,8 @@ The computer must be on the same network as the devices. Discovery listens on UD
 | `robotraconteur_start_sequence` | Start a timed sequence of steps and return its ID immediately |
 | `robotraconteur_sequence_status`, `robotraconteur_cancel_sequence` | Follow a sequence and get its results, or stop it |
 
+If the client cancels a tool call, such as when the user presses Esc, a `robotraconteur_robot_move_joints` motion is stopped and the robot halted, and a generator `robotraconteur_call_function` is aborted. A plain function call stops being waited for, but the service finishes it, since a Robot Raconteur call cannot be stopped once sent. `robotraconteur_robot_move_joints` halts the robot whenever the motion does not complete: when it is stopped, fails, or does not finish within `duration_s` plus 30 seconds, which is an error. Only one motion at a time can run on a robot, whichever name it is given by.
+
 Services are named by `robotraconteur_discover` as `node.service`, and a name stays the same while the server runs. The service name alone also works when only one service has it. If two nodes share a node name, the later one gets part of its node ID added to the name. Sub objects are selected with paths such as `arm.tool[0]`. Enums can be given by name, and fields left out of a structure are filled with zero or empty values. Discovery runs continuously in the background, and a search can take up to 15 seconds to find a service. `robotraconteur_discover` never waits for one. While searching it returns `searching: true` and `check_again_after_s`.
 
 ### Timed sequences
@@ -93,7 +95,7 @@ Each entry of `sequences` has `steps`, and optionally `label`, `service` for its
   "condition": { "joint_position.0": { "$gte": 0.29 }, "controller_state.name": "motor_on" } }
 ```
 
-The condition is a MongoDB query, which models already know, evaluated by [mingo](https://github.com/kofrasa/mingo) against the same JSON that `read_wire` or `get_property` returns. A JSON object, such as a structure, is queried by its fields. Any other value, such as a number or an array, is queried as `value`, as in `{ "value": { "$gt": 0.5 } }`, or an array element, as in `{ "value.0": { "$gte": 0.8 } }`. `$expr` arithmetic works, for example to check that a joint is within a tolerance of its target. Scripts are turned off, and `$where`, `$function`, `$accumulator`, and regular expressions are refused, so a condition cannot run code or take unbounded time. Conditions are checked with the other steps before a sequence starts.
+The condition is a MongoDB query, which models already know, evaluated by [mingo](https://github.com/kofrasa/mingo) against the same JSON that `read_wire` or `get_property` returns. A JSON object, such as a structure, is queried by its fields. Any other value, such as a number or an array, is queried as `value`, as in `{ "value": { "$gt": 0.5 } }`, or an array element, as in `{ "value.0": { "$gte": 0.8 } }`. `$expr` arithmetic works, for example to check that a joint is within a tolerance of its target. Only a list of operators is allowed: the query operators, and in `$expr` arithmetic, comparison, logical, conditional, type, string, and simple array operators. Operators that run code (`$where`, `$function`, `$accumulator`), use regular expressions, or loop over or build arrays (`$map`, `$filter`, `$reduce`, `$range`) are refused, so a condition cannot run code, and takes time in proportion to its size and the value's. Conditions are checked with the other steps before a sequence starts.
 
 Values appear as the read tools show them, which matters when writing a condition:
 
@@ -160,7 +162,7 @@ An optional JSON file, passed as the first argument, can limit what is used:
 { "serviceTypes": ["com.robotraconteur.robotics.robot.Robot"], "nodeNames": ["left_arm"] }
 ```
 
-It can also list services at known addresses with `"services": [{ "name": "ur5e", "url": "rr+tcp://..." }]`, and enable IPv4 discovery with `"ipv4Discovery": true`.
+It can also list services at known addresses with `"services": [{ "name": "ur5e", "url": "rr+tcp://..." }]`, and enable IPv4 discovery with `"ipv4Discovery": true`. The file is checked when the server starts, and a misspelled or unknown setting stops it with an error naming the setting.
 
 ## Building and testing
 
