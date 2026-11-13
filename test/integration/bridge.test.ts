@@ -1238,6 +1238,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         }
         assert.match(b.results.find((r: any) => r.label === "listen").error, /stopped by the call's stop_when \(show_stop\)/);
         await fails(bridge, "robotraconteur_start_sequence", { stop_when: { service, name: "ev2", condition: {}, at_s: 1 }, sequences: [{ service: "reynard", steps: [{ action: "noop" }] }] }, /at_s/);
+        await fails(bridge, "robotraconteur_start_sequence", { stop_when: { name: "ev2", condition: {} }, sequences: [{ service: "reynard", steps: [{ action: "noop" }] }] }, /The stop_when action needs service/);
     });
 
     test("cancel stops a sequence blocked in a plain function call at once", async () =>

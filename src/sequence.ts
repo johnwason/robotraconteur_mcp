@@ -804,8 +804,8 @@ export class SequenceRunner
         if (step.watch === undefined)
         {
             if (step.combine !== undefined) throw new Error("combine needs watch.");
-            if (step.name === undefined || step.condition === undefined) throw new Error("The wait_until action needs name and condition, or watch.");
-            if (step.service === undefined) throw new Error("The wait_until action needs service.");
+            if (step.name === undefined || step.condition === undefined) throw new Error(`The ${step.action} action needs name and condition, or watch.`);
+            if (step.service === undefined) throw new Error(`The ${step.action} action needs service.`);
             return [{ key: step.name, service: step.service, object: step.object, name: step.name, condition: step.condition }];
         }
         if (step.name !== undefined || step.condition !== undefined || step.object !== undefined) throw new Error("Give either watch, or name and condition, not both. With watch, name, condition, and object go in each entry.");
