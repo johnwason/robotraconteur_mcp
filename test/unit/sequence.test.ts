@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { compileCondition } from "../../src/condition.js";
+import { help } from "../../src/help.js";
 import { loadConfig } from "../../src/registry.js";
 import { SequenceRunner } from "../../src/sequence.js";
 import type { SequenceSpec } from "../../src/sequence.js";
@@ -169,4 +170,24 @@ test("a refused sequence names the robotraconteur_help topic that explains it", 
     await refused([{ steps: [{ action: "wait_until", service: "s", name: "new_message", condition: {} }] }], "waiting");
     await refused([{ steps: [{ action: "end_stop_when" }] }], "stopping");
     await refused([{ steps: [{ action: "fly" }] }], "actions");
+});
+
+test("help gives each page once, ignores case, and notes unknown topics without losing the rest", () =>
+{
+    const count = (text: string, heading: string) => text.split(heading).length - 1;
+    const both = help("sequences", ["examples", "timing"]);
+    assert.equal(count(both, "## examples\n"), 1, "a topic the category includes is not repeated");
+    assert.equal(count(help(undefined, ["timing", "timing"]), "## timing\n"), 1);
+    assert.equal(count(help(undefined, ["Timing", "TIMING"]), "## timing\n"), 1, "names ignore case");
+    assert.match(help(undefined, ["COM.robotraconteur.UUID"]), /# Service: `com\.robotraconteur\.uuid`/);
+    const mixed = help(undefined, ["timing", "bogus_topic", "com.robotraconteur.uuid"]);
+    assert.match(mixed, /## timing\n/);
+    assert.match(mixed, /# Service: `com\.robotraconteur\.uuid`/);
+    assert.match(mixed, /Note: Unknown topic bogus_topic\./);
+    assert.throws(() => help(undefined, ["bogus_topic"]), /Unknown topic bogus_topic/);
+    assert.equal(help(undefined, []), help(), "an empty list is the same as none");
+    const index = help("standard_service_types", ["com.robotraconteur.uuid"]);
+    assert.match(index, /## standard_service_types/);
+    assert.match(index, /# Service: `com\.robotraconteur\.uuid`/);
+    assert.doesNotMatch(index, /## timing/);
 });

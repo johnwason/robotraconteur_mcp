@@ -190,7 +190,7 @@ Essentials: steps of a sequence run one at a time, in order. Sequences in one ca
     }, (a) => respond(() => sequences.start(a.sequences as SequenceSpec[], a.wait_s ?? 0, a.detail ?? "compact", a.stop_when as CallStopWhen | undefined, a.until, a.stop_together ?? false)));
 
     server.registerTool("robotraconteur_help", {
-        description: `Detailed help, by category or topic. Without either, gives the sequences category. Categories:
+        description: `Detailed help, by category or topic, each page once. Without a category or topics, gives the sequences category. Topic names ignore case. Categories:
 sequences: the rules for robotraconteur_start_sequence. Call it before writing your first sequence, and when a rule is unclear. Its topics:
 - actions: what each sequence action takes, the fields any step can use, and the limits
 - timing: at_s, after, at, and the max_late and max_late_s deadlines, and starting several things at the same instant

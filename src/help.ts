@@ -30,22 +30,49 @@ function standardIndex(): string
     return `## standard_service_types\nThe standard service definitions, used by robots, cameras, sensors, and other devices. Their robdefs carry little documentation, to keep them small, so it is here. Each is a topic by its full name, such as com.robotraconteur.robotics.robot. A page lists the services it imports and the types it uses from them, which are on those services' pages.\n${lines.join("\n")}`;
 }
 
-/** The help asked for: a category, topics, or both. With neither, the sequences category */
+/** A topic by name, ignoring case: a sequence topic or a standard service definition */
+function findTopic(name: string): { kind: "sequence" | "standard"; name: string } | undefined
+{
+    const lower = name.trim().toLowerCase();
+    const sequence = HELP_TOPICS.find((t) => t === lower);
+    if (sequence) return { kind: "sequence", name: sequence };
+    const standard = Object.keys(STANDARD_DOCS).find((t) => t.toLowerCase() === lower);
+    return standard ? { kind: "standard", name: standard } : undefined;
+}
+
+/**
+ * The help asked for: a category, topics, or both, each page once. With neither, or with an empty
+ * list of topics, the sequences category. Unknown topics are named in a note after the pages found,
+ * and are an error only if no topic was found
+ */
 export function help(category?: HelpCategory, topics?: string[]): string
 {
     const parts: string[] = [];
+    const given = new Set<string>();
     if (category === "standard_service_types") parts.push(standardIndex());
-    if (category === "sequences" || (category === undefined && !topics?.length)) parts.push(sequenceHelp());
+    if (category === "sequences" || (category === undefined && !topics?.length))
+    {
+        parts.push(sequenceHelp());
+        for (const t of HELP_TOPICS) given.add(t);
+    }
     const unknown: string[] = [];
     for (const t of topics ?? [])
     {
-        if (HELP_TOPICS.includes(t as HelpTopic)) parts.push(sequenceHelp([t]));
-        else if (isStandardService(t)) parts.push(STANDARD_DOCS[t]!.page);
-        else unknown.push(t);
+        const found = findTopic(t);
+        if (!found)
+        {
+            if (!unknown.includes(t)) unknown.push(t);
+            continue;
+        }
+        if (given.has(found.name)) continue;
+        given.add(found.name);
+        parts.push(found.kind === "sequence" ? sequenceHelp([found.name]) : STANDARD_DOCS[found.name]!.page);
     }
     if (unknown.length > 0)
     {
-        throw new Error(`Unknown topic ${unknown.join(", ")}. The sequence topics are ${HELP_TOPICS.join(", ")}. The standard service definitions are topics by their full names, such as com.robotraconteur.robotics.robot; category standard_service_types lists them.`);
+        const note = `Unknown topic ${unknown.join(", ")}. The sequence topics are ${HELP_TOPICS.join(", ")}. The standard service definitions are topics by their full names, such as com.robotraconteur.robotics.robot; category standard_service_types lists them.`;
+        if (parts.length === 0) throw new Error(note);
+        parts.push(`Note: ${note}`);
     }
     return parts.join("\n\n");
 }
