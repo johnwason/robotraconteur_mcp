@@ -18,9 +18,10 @@
 import { performance } from "node:perf_hooks";
 import { compileCondition } from "./condition.js";
 import { errorText } from "./errors.js";
+import type { ReceivedEvent } from "./registry.js";
 import type { BridgeTools } from "./tools.js";
 
-export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until"] as const;
+export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when"] as const;
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number];
 
 /** One of the things a wait_until step watches, with its own condition */
@@ -31,6 +32,24 @@ export interface WatchEntry
     object?: string;
     name: string;
     condition: Record<string, unknown>;
+}
+
+/** A wait_until or stop_when step's watch, compiled and ready to check */
+interface PreparedWatch
+{
+    step: SequenceStep;
+    watches: (Watch & { test: (value: unknown) => boolean })[];
+    kinds: ("wire" | "property" | "event")[];
+    combine?: (value: unknown) => boolean;
+    since?: number;
+}
+
+/** What one check found for one watched thing */
+interface WatchOutcome
+{
+    matched: boolean;
+    value?: unknown;
+    event?: ReceivedEvent;
 }
 
 /** A watch entry with its defaults filled in */
@@ -71,7 +90,7 @@ export interface SequenceStep
     continue_on_error?: boolean;
 }
 
-export type SequenceState = "running" | "completed" | "failed" | "cancelled" | "timed_out";
+export type SequenceState = "running" | "completed" | "failed" | "cancelled" | "stopped" | "timed_out";
 
 /** compact leaves out steps that succeeded without a value, a label, or lateness. full gives every step */
 export type ResultDetail = "compact" | "full";
@@ -86,7 +105,8 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     read_events: ["service", "name", "clear", "limit"],
     robot_move_joints: ["service", "object", "joint_position", "duration_s"],
     wait: ["seconds"],
-    wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"]
+    wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"],
+    stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"]
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "repeat", "continue_on_error"];
 
@@ -133,7 +153,7 @@ interface StepResult
 
 class SequenceStopped extends Error
 {
-    constructor(readonly state: "cancelled" | "timed_out", message: string)
+    constructor(readonly state: "cancelled" | "stopped" | "timed_out", message: string)
     {
         super(message);
     }
@@ -222,6 +242,9 @@ class Sequence
     current?: { step: number; iteration?: number; waiting: boolean; starts_at_s: number };
     /** Where the sequence was when it stopped, if it did not complete */
     stopped_at?: { step: number; iteration?: number; waiting: boolean };
+    /** The stop_when step that stopped the sequence, and what it saw */
+    stopped_by?: Record<string, unknown>;
+    stop_message?: string;
     total_runs = 0;
     readonly results: StepResult[] = [];
     readonly controller = new AbortController();
@@ -387,8 +410,9 @@ export class SequenceRunner
             if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error("The wait action needs seconds, from 0 up to max_duration_s.");
             return;
         }
-        if (step.action === "wait_until")
+        if (step.action === "wait_until" || step.action === "stop_when")
         {
+            if (step.action === "stop_when" && step.repeat) throw new Error("A stop_when step cannot repeat.");
             await this.checkWaitUntil(step, max_duration_s);
             return;
         }
@@ -456,7 +480,7 @@ export class SequenceRunner
 
     private async checkWaitUntil(step: SequenceStep, max_duration_s: number): Promise<void>
     {
-        if (!(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
+        if (step.action === "wait_until" && !(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
         if (step.check_every_s !== undefined && !(step.check_every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`check_every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
         const watches = this.watches(step);
         for (const [i, w] of watches.entries())
@@ -521,66 +545,126 @@ export class SequenceRunner
         }
     }
 
-    /**
-     * Wait until the watched things meet their conditions: any of them, or as combine says. A wire or
-     * property meets its condition when its latest value does, and an event when one received and not
-     * yet read does. The events that met their conditions are returned and removed from the events
-     * read_events returns. Fails when timeout_s passes
-     */
-    private async waitUntil(step: SequenceStep, signal: AbortSignal): Promise<unknown>
+    /** A stop_when step: start watching in the background, and go on to the next step at once */
+    private async startStopWhen(sequence: Sequence, step: SequenceStep, index: number): Promise<unknown>
+    {
+        this.startMonitor(sequence, step, index, await this.prepareWatch(step));
+        return { watching: true };
+    }
+
+    /** Compile what a wait_until or stop_when step watches, and find whether each is a wire, property, or event */
+    private async prepareWatch(step: SequenceStep): Promise<PreparedWatch>
     {
         const watches = this.watches(step).map((w) => ({ ...w, test: compileCondition(w.condition) }));
         const kinds = await Promise.all(watches.map((w) => this.tools.watchedKind(w.service, w.object, w.name)));
-        const combine = step.combine ? compileCondition(step.combine) : undefined;
-        const since = step.new_events_only ? Date.now() : undefined;
+        return { step, watches, kinds, combine: step.combine ? compileCondition(step.combine) : undefined, since: step.new_events_only ? Date.now() : undefined };
+    }
+
+    /**
+     * Check the watched things once: any of them meeting its condition, or as combine says. A wire or
+     * property meets its condition when its latest value does, and an event when one received and not
+     * yet read does
+     */
+    private async checkOnce(p: PreparedWatch): Promise<{ met: boolean; outcomes: WatchOutcome[] }>
+    {
+        const outcomes = await Promise.all(p.watches.map(async (w, i): Promise<WatchOutcome> =>
+        {
+            if (p.kinds[i] === "event")
+            {
+                const event = this.tools.findEvent(w.service, w.name, w.test, p.since);
+                return { matched: event !== undefined, event };
+            }
+            const value = await this.tools.readValue(w.service, w.object, w.name);
+            return { matched: w.test(value), value };
+        }));
+        const met = p.combine ? p.combine(Object.fromEntries(p.watches.map((w, i) => [w.key, outcomes[i]!.matched]))) : outcomes.some((o) => o.matched);
+        return { met, outcomes };
+    }
+
+    /** Take the events that met their conditions from the events read_events returns, and describe what was met */
+    private takeMatched(p: PreparedWatch, outcomes: WatchOutcome[], waited_s: number): Record<string, unknown>
+    {
+        for (const [i, o] of outcomes.entries())
+        {
+            if (o.event) this.tools.removeEvent(p.watches[i]!.service, o.event);
+        }
+        if (!p.step.watch)
+        {
+            const o = outcomes[0]!;
+            return p.kinds[0] === "event" ? { matched: true, waited_s, event: o.event } : { matched: true, waited_s, value: o.value };
+        }
+        return {
+            matched: true,
+            waited_s,
+            met: p.watches.filter((_, i) => outcomes[i]!.matched).map((w) => w.key),
+            watch: Object.fromEntries(p.watches.map((w, i) =>
+            {
+                const o = outcomes[i]!;
+                return [w.key, p.kinds[i] === "event" ? (o.event ? { matched: true, event: o.event } : { matched: false }) : { matched: o.matched, value: o.value }];
+            }))
+        };
+    }
+
+    /** Wait until the watched things meet their conditions, taking the events that did. Fails when timeout_s passes */
+    private async waitUntil(step: SequenceStep, signal: AbortSignal): Promise<unknown>
+    {
+        const p = await this.prepareWatch(step);
         const started = performance.now();
         const deadline = started + step.timeout_s! * 1000;
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
         for (;;)
         {
             const checked = performance.now();
-            const outcomes = await Promise.all(watches.map(async (w, i) =>
-            {
-                if (kinds[i] === "event")
-                {
-                    const event = this.tools.findEvent(w.service, w.name, w.test, since);
-                    return { matched: event !== undefined, event };
-                }
-                const value = await this.tools.readValue(w.service, w.object, w.name);
-                return { matched: w.test(value), value };
-            }));
-            const met = combine ? combine(Object.fromEntries(watches.map((w, i) => [w.key, outcomes[i]!.matched]))) : outcomes.some((o) => o.matched);
-            if (met)
-            {
-                for (const [i, o] of outcomes.entries())
-                {
-                    if (o.event) this.tools.removeEvent(watches[i]!.service, o.event);
-                }
-                const waited_s = round((performance.now() - started) / 1000);
-                if (!step.watch)
-                {
-                    const o = outcomes[0]!;
-                    return kinds[0] === "event" ? { matched: true, waited_s, event: o.event } : { matched: true, waited_s, value: o.value };
-                }
-                return {
-                    matched: true,
-                    waited_s,
-                    met: watches.filter((_, i) => outcomes[i]!.matched).map((w) => w.key),
-                    watch: Object.fromEntries(watches.map((w, i) =>
-                    {
-                        const o = outcomes[i]!;
-                        return [w.key, kinds[i] === "event" ? (o.event ? { matched: true, event: o.event } : { matched: false }) : { matched: o.matched, value: o.value }];
-                    }))
-                };
-            }
+            const { met, outcomes } = await this.checkOnce(p);
+            if (met) return this.takeMatched(p, outcomes, round((performance.now() - started) / 1000));
             if (performance.now() >= deadline)
             {
                 // With new_events_only, say how many earlier events were passed over, which shows the setting at work
-                const ignored = watches.map((w, i) => since !== undefined && kinds[i] === "event" ? this.tools.countEarlierEvents(w.service, w.name, w.test, since) : 0);
-                throw new Error(this.notMet(step, watches, kinds, outcomes, ignored));
+                const ignored = p.watches.map((w, i) => p.since !== undefined && p.kinds[i] === "event" ? this.tools.countEarlierEvents(w.service, w.name, w.test, p.since!) : 0);
+                throw new Error(this.notMet(step, p.watches, p.kinds, outcomes, ignored));
             }
             await sleep(Math.min(checked + every, deadline) - performance.now(), signal);
         }
+    }
+
+    /**
+     * Start a stop_when step: watch in the background until the sequence ends, and stop it when the
+     * condition is met, as a cancel does. If the watched things cannot be read, the sequence is
+     * stopped too, rather than going on unwatched
+     */
+    private startMonitor(sequence: Sequence, step: SequenceStep, index: number, p: PreparedWatch): void
+    {
+        const signal = sequence.controller.signal;
+        const started = performance.now();
+        const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
+        const which = `stop_when steps[${index}]${step.label ? ` (${step.label})` : ""}`;
+        void (async () =>
+        {
+            while (sequence.state === "running" && !signal.aborted)
+            {
+                const checked = performance.now();
+                let result: { met: boolean; outcomes: WatchOutcome[] };
+                try
+                {
+                    result = await this.checkOnce(p);
+                }
+                catch (e)
+                {
+                    if (sequence.state !== "running" || signal.aborted) return;
+                    sequence.stopped_by = { step: index, label: step.label, error: errorText(e) };
+                    sequence.controller.abort(new SequenceStopped("stopped", `${which} could not check its condition, so the sequence was stopped: ${errorText(e)}`));
+                    return;
+                }
+                if (sequence.state !== "running" || signal.aborted) return;
+                if (result.met)
+                {
+                    sequence.stopped_by = { step: index, label: step.label, ...this.takeMatched(p, result.outcomes, round((performance.now() - started) / 1000)) };
+                    sequence.controller.abort(new SequenceStopped("stopped", `The sequence was stopped by ${which}, whose condition was met`));
+                    return;
+                }
+                await sleep(checked + every - performance.now(), signal).catch(() => undefined);
+            }
+        })();
     }
 
     /** Why a wait_until timed out, with the last value of each wire or property */
@@ -636,7 +720,7 @@ export class SequenceRunner
                     {
                         // A robot motion, a generator, or a wait stops itself when aborted, halting a robot
                         // first, so it is waited for. Other requests are left to finish in the background
-                        const action = this.act(step, signal);
+                        const action = step.action === "stop_when" ? this.startStopWhen(sequence, step, i) : this.act(step, signal);
                         const result = SIGNALLED.includes(step.action) ? await action : await untilAborted(action, signal);
                         if (result !== null && result !== undefined) entry.result = result;
                     }
@@ -664,7 +748,8 @@ export class SequenceRunner
             {
                 sequence.state = e.state;
                 // stopped explains a cancel, which is not an error. Running out of time is
-                if (e.state === "timed_out") sequence.error = e.message;
+                if (e.state === "timed_out" || sequence.stopped_by?.error !== undefined) sequence.error = e.message;
+                if (e.state === "stopped") sequence.stop_message = e.message;
             }
             else
             {
@@ -719,12 +804,14 @@ export class SequenceRunner
         }
         const at = sequence.stopped_at;
         // A failed sequence says what happened in error
-        if (at && (sequence.state === "cancelled" || sequence.state === "timed_out"))
+        if (at && (sequence.state === "cancelled" || sequence.state === "stopped" || sequence.state === "timed_out"))
         {
             const s = sequence.steps[at.step]!;
             const which = `step ${at.step}${at.iteration !== undefined ? ` run ${at.iteration}` : ""} (${s.label ?? s.action})`;
-            report.stopped = at.waiting ? `Between steps: nothing was running. ${which} was waiting for its time and did not start` : `During ${which}, which was stopped`;
+            const where = at.waiting ? `Between steps: nothing was running. ${which} was waiting for its time and did not start` : `During ${which}, which was stopped`;
+            report.stopped = sequence.state === "stopped" && sequence.stop_message && sequence.stopped_by?.error === undefined ? `${sequence.stop_message}. ${where}` : where;
         }
+        if (sequence.stopped_by) report.stopped_by = sequence.stopped_by;
         if (sequence.state !== "running" && sequence.total_runs > sequence.results.length) report.not_run = sequence.total_runs - sequence.results.length;
         if (sequence.error) report.error = sequence.error;
         report.results = results;

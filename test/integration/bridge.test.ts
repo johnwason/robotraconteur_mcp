@@ -728,6 +728,71 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual(cancelled.results.map((r: any) => r.label), ["say 0"]);
     });
 
+    test("stop_when stops a sequence partway when its condition is met", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            service,
+            steps: [
+                { action: "stop_when", name: "ev2", condition: { d1: { $gt: 5 } }, label: "guard" },
+                { action: "wait", seconds: 20, label: "long" },
+                { action: "call_function", name: "func1", arguments: [] }
+            ]
+        });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [1, 0] });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [9, 0] });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "stopped", JSON.stringify(status));
+        assert.ok(status.elapsed_s < 5, `stopped promptly: ${status.elapsed_s}`);
+        assert.equal(status.stopped_by.step, 0);
+        assert.equal(status.stopped_by.label, "guard");
+        assert.equal(status.stopped_by.event.arguments.d1, 9);
+        assert.match(status.stopped, /^The sequence was stopped by stop_when steps\[0\] \(guard\), whose condition was met\. During step 1 \(long\), which was stopped/);
+        assert.equal(status.not_run, 1);
+        assert.equal(status.error, undefined);
+        assert.deepEqual(status.results[0].result, { watching: true });
+        // The matched event was taken. The one that did not match is still there
+        assert.deepEqual((await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" })).events.map((e: any) => e.arguments.d1), [1]);
+    });
+
+    test("stop_when that is never met lets the sequence complete", async () =>
+    {
+        const status = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            steps: [
+                { action: "stop_when", name: "color", condition: { "value.0": { $gt: 5 } } },
+                { action: "wait", seconds: 0.5 },
+                { action: "get_property", name: "color" }
+            ]
+        });
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        assert.equal(status.stopped_by, undefined);
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "stop_when", name: "color", condition: {}, timeout_s: 1 }] }, /The stop_when action does not use timeout_s/);
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "stop_when", name: "color", condition: {}, repeat: { count: 2, every_s: 1 } }] }, /A stop_when step cannot repeat/);
+    });
+
+    test("stop_when halts a robot that passes a limit", async () =>
+    {
+        const service = "robot_b.robot";
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            service,
+            steps: [
+                { action: "stop_when", name: "robot_state", condition: { "joint_position.0": { $gte: 0.2 } }, label: "limit", check_every_s: 0.02 },
+                { action: "robot_move_joints", joint_position: [0.5, 0, 0, 0, 0, 0], duration_s: 4 }
+            ]
+        });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "stopped", JSON.stringify(status));
+        assert.ok(status.stopped_by.value.joint_position[0] >= 0.2);
+        assert.equal((await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" })).value.name, "halt");
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const stopped = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
+        assert.ok(stopped >= 0.2 && stopped < 0.3, `halted just past the limit: ${stopped}`);
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+    });
+
     test("a sequence that runs past max_duration_s is stopped", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
