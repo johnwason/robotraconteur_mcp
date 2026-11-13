@@ -498,9 +498,11 @@ describe("timed sequences", { timeout: 300000 }, () =>
         });
         assert.match(started.sequence_id, /^seq-\d+$/);
         assert.equal(started.state, "running");
+        assert.ok(Math.abs(Date.parse(started.started) - Date.now()) < 5000, started.started);
 
         const status = await finish(started.sequence_id);
         assert.equal(status.state, "completed", JSON.stringify(status));
+        assert.equal(status.started, started.started);
         assert.equal(status.results.length, 10);
         assert.equal(status.more_results, false);
         assert.equal(status.next_index, 10);

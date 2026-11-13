@@ -275,6 +275,7 @@ export class SequenceRunner
         return {
             sequence_id: sequence.id,
             state: sequence.state,
+            started: sequence.started.toISOString(),
             steps: steps.length,
             max_duration_s,
             note: "The sequence is running. Use robotraconteur_sequence_status to follow it, with wait_s to wait for it to finish, and robotraconteur_cancel_sequence to stop it."
@@ -658,6 +659,7 @@ export class SequenceRunner
         const report: Record<string, unknown> = {
             sequence_id: sequence.id,
             state: sequence.state,
+            started: sequence.started.toISOString(),
             elapsed_s: round(sequence.finished_s ?? sequence.elapsed),
             max_duration_s: sequence.max_duration_s,
             steps: sequence.steps.length

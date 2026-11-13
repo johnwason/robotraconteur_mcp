@@ -158,7 +158,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a) => respond(() => sequences.start(a.steps as SequenceStep[], a.max_duration_s, a.service, a.wait_s ?? 0)));
 
     server.registerTool("robotraconteur_sequence_status", {
-        description: "Report the state of a sequence and the results of its steps so far: running, completed, failed, cancelled, or timed_out. Each result has the step index, when it started in seconds from the start of the sequence, how long it took, how late it started if it was late, and its result or error. Set wait_s to wait for the sequence to finish, up to 30 seconds, rather than calling repeatedly. Results are returned in order, and a long list is split over calls: pass next_index as from_index to get the rest, or only the new ones. Without sequence_id, lists the sequences.",
+        description: "Report the state of a sequence and the results of its steps so far: running, completed, failed, cancelled, or timed_out. started is when the sequence started, and each result has the step index, when it started in seconds from that time, how long it took, how late it started if it was late, and its result or error. Set wait_s to wait for the sequence to finish, up to 30 seconds, rather than calling repeatedly. Results are returned in order, and a long list is split over calls: pass next_index as from_index to get the rest, or only the new ones. Without sequence_id, lists the sequences.",
         inputSchema: z.object({
             sequence_id: z.string().optional().describe("The sequence, from robotraconteur_start_sequence"),
             from_index: z.number().int().min(0).optional().describe("Return results from this index. The default is 0"),
