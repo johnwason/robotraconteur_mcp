@@ -118,7 +118,8 @@ let bridge: Client;
 
 before(async () =>
 {
-    start("python3", ["-m", "reynard_the_robot"]);
+    // Reynard with a diagnostics service, which sends chat messages and logs what Reynard does
+    start("python3", ["test/services/instrumented_reynard.py"]);
     await waitForPort(29200);
     start("python3", ["test/services/loopback_robot.py", "--nodename", "robot_a", "--port", "52701", "--attributes", '{"site":"lab"}']);
     await waitForPort(52701);
@@ -126,7 +127,7 @@ before(async () =>
     await waitForPort(52702);
     start("python3", ["-u", "test/services/rr_test_server.py"]);
     bridge = await startBridge();
-    await discover(bridge, ["reynard", "robot_a.robot", "robot_b.robot", TEST_SERVICE]);
+    await discover(bridge, ["reynard", "reynard_diagnostics", "robot_a.robot", "robot_b.robot", TEST_SERVICE]);
 }, { timeout: 180000 });
 
 after(async () =>
@@ -896,6 +897,36 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: The condition is not a valid MongoDB query/);
     });
 
+    test("a chat message from the diagnostics service stops a show at once, and on_stop reacts", async () =>
+    {
+        const diagnostics = "reynard_diagnostics";
+        await ok(bridge, "robotraconteur_read_events", { service: "reynard" });
+        await ok(bridge, "robotraconteur_call_function", { service: diagnostics, name: "clear_log" });
+        const status = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            steps: [
+                { action: "stop_when", name: "new_message", condition: {}, label: "stop" },
+                // Typed by nobody: the diagnostics service sends it 1 s from now
+                { action: "call_function", service: diagnostics, name: "send_message_after", arguments: ["hi", 1.0] },
+                { action: "call_function", name: "say", arguments: ["The show begins"] },
+                { action: "wait", seconds: 8, label: "show" }
+            ],
+            on_stop: [{ action: "call_function", name: "say", arguments: ["Stopped"] }]
+        });
+        assert.equal(status.state, "stopped", JSON.stringify(status));
+        assert.equal(status.stopped_by.event.arguments.message, "hi");
+        assert.ok(status.stopped_by.event_to_stop_s < 0.2, `stopped soon after the message: ${status.stopped_by.event_to_stop_s}`);
+
+        // The log shows the message, then Reynard saying Stopped right after it
+        const log = (await ok(bridge, "robotraconteur_call_function", { service: diagnostics, name: "read_log", arguments: [0] })).result;
+        const message = log.find((e: any) => e.kind === "message");
+        const stopped = log.find((e: any) => e.kind === "say" && e.text === "Stopped");
+        assert.ok(message && stopped, JSON.stringify(log));
+        assert.ok(stopped.time - message.time < 0.3, `Stopped was said ${stopped.time - message.time} s after the message`);
+        assert.ok(log.some((e: any) => e.kind === "say" && e.text === "The show begins"));
+    });
+
     test("stop_when halts a robot that passes a limit", async () =>
     {
         const service = "robot_b.robot";
@@ -1035,13 +1066,18 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const deadline = Date.now() + 10000;
         while (Date.now() < deadline && (await ok(bridge, "robotraconteur_read_events", { service, clear: false })).events.length < 4) await new Promise((resolve) => setTimeout(resolve, 100));
 
+        // The test service fires each event from its own timer, so they can arrive in any order. The
+        // reads take them oldest first, two then one
         const first = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", limit: 2 });
-        assert.deepEqual(first.events.map((e: any) => e.arguments.d1), [1, 2]);
+        assert.equal(first.events.length, 2);
         assert.equal(first.remaining, 1);
         assert.match(first.note, /1 more event is waiting/);
         const second = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" });
-        assert.deepEqual(second.events.map((e: any) => e.arguments.d1), [3]);
+        assert.equal(second.events.length, 1);
         assert.equal(second.remaining, 0);
+        const all = [...first.events, ...second.events];
+        assert.deepEqual(all.map((e: any) => e.arguments.d1).sort(), [1, 2, 3]);
+        assert.deepEqual(all.map((e: any) => e.time), all.map((e: any) => e.time).sort(), "oldest first");
         assert.ok(Date.parse(second.now) >= Date.parse(second.events[0].time), "now is after the event");
         // The ev1 event was not taken by the reads of ev2
         assert.deepEqual((await ok(bridge, "robotraconteur_read_events", { service })).events.map((e: any) => e.event), ["ev1"]);

@@ -21,12 +21,20 @@ python -m pip install reynard-the-robot==0.3.1 robotraconteur-abstract-robot==0.
 Then start each of these in its own terminal, from this folder:
 
 ```sh
-python -m reynard_the_robot
+python test/services/instrumented_reynard.py
 python test/services/loopback_robot.py --nodename left_arm --port 52701 --attributes "{\"site\":\"lab\"}"
 python test/services/loopback_robot.py --nodename right_arm --port 52702
 ```
 
-Reynard's web page is at http://localhost:29201, so you can watch it move. The two robots run until their terminals are closed or Ctrl+D is pressed.
+Reynard's web page is at http://localhost:29201, so you can watch it move.
+
+`instrumented_reynard.py` runs Reynard as `python -m reynard_the_robot` does, and adds a `reynard_diagnostics` service on the same node, so tests can run without anyone typing in the web page:
+
+- `send_message(message)` sends a chat message as if typed in the web page, and Reynard's `new_message` event fires with it.
+- `send_message_after(message, delay)` sends one `delay` seconds later without waiting, so that it arrives while a sequence runs. `cancel_scheduled_messages()` cancels those not yet sent.
+- `read_log(since)` returns what Reynard was asked to do since a wall clock time in seconds since 1970 (0 for all): `say`, `color`, `teleport`, `set_arm_position`, `drive_robot`, `drive_arm`, and chat messages, each with its time, text, and values in the `reynard` service's units. `clear_log()` empties it.
+
+To test without typing, tell the model to use `reynard_diagnostics` to send the chat messages a test calls for, and to check the timing of what Reynard did with `read_log`. The two robots run until their terminals are closed or Ctrl+D is pressed.
 
 ## 3. Connect
 
