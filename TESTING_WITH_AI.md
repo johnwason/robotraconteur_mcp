@@ -52,6 +52,7 @@ Start with the first prompt. It keeps the model from learning the devices by rea
 | 6 | Type a message into Reynard's web page, then ask: What messages has Reynard received? | It calls `robotraconteur_read_events` for Reynard, and reports the `new_message` event. Events are collected once the service has been used, so earlier prompts must have used Reynard. |
 | 7 | Have Reynard say "Three", "Two", "One" exactly one second apart, then "Go!" while the left arm moves to 0.5, 0, 0, 0, 0, 0 over 3 seconds. Sample the arm's joint 1 every half second during the motion, and tell me how far it had moved at each sample. | It uses `robotraconteur_start_sequence`, with the says one second apart (`at_s` or waits), the motion, and the samples running together. A motion step waits for the robot to arrive, so the samples need `at_s` times that fall during it, or the says and samples go in one sequence and the motion in another. It then calls `robotraconteur_sequence_status` with `wait_s`, rather than many quick calls, and reports the samples with their times. |
 | 8 | Move the right arm to 0.6, 0, 0, 0, 0, 0 over 10 seconds. Then, part way through, say: Stop the right arm now. | It moves the arm with a sequence, or with `robotraconteur_robot_move_joints`, which returns only when the motion ends. With a sequence it can stop the arm with `robotraconteur_cancel_sequence`, which leaves the arm halted part way. Watch whether it chooses the sequence because it expects to be interrupted. |
+| 9 | Move the left arm to 0.6, 0, 0, 0, 0, 0 over 4 seconds, and have Reynard say "Halfway!" as the first joint passes 0.3. | It starts the motion in one sequence, and in a second uses `wait_until` on `robot_state` with a condition such as `{ "joint_position.0": { "$gte": 0.3 } }`, then calls `say`. Reynard should speak about two seconds in. |
 
 ## What to watch for
 
@@ -60,7 +61,7 @@ Whether the model can work out what to do is the point of this test, more than w
 - Does it use `robotraconteur_describe` before acting, or guess at names?
 - Does it call `robotraconteur_discover` again when `searching` is true, or conclude that nothing is there?
 - Does it use a sequence when timing matters, and `wait_s` rather than calling `robotraconteur_sequence_status` over and over?
-- Does it avoid using a sequence to poll, such as repeating `read_wire` to wait for something to happen?
+- Does it use `wait_until` to wait for something to happen, rather than repeating `read_wire`? Are its conditions written against the fields `read_wire` returns?
 - The service definition gives no units for `teleport`. Does it use meters, as the server instructions say Robot Raconteur assumes, or ask?
 - When a call fails, does the error message tell it enough to fix the call?
 - Which tools did it ignore or misuse? Their descriptions are in `src/index.ts`.

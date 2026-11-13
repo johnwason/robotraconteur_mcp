@@ -66,14 +66,23 @@ Each tool call is a round trip through the model, which takes seconds and varies
 }
 ```
 
-- Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`.
+- Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`, and `wait_until`, described below.
 - Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later. `repeat` runs a step `count` times, `every_s` apart.
 - A `robot_move_joints` step finishes when the robot arrives. To do something during a motion, such as sampling a wire, start a second sequence; sequences run side by side.
-- A sequence is not for polling, such as repeating `read_wire` to wait for something to happen. It runs a fixed plan and cannot react to what it reads, so `repeat` is for samples at set times. The tool description tells the model this.
+- To wait for something to happen, the model uses `wait_until`, not a repeated `read_wire`. `repeat` runs a fixed number of times and cannot react to what it reads, so it is for samples at set times. The tool description tells the model this.
 - Every step is checked before the sequence starts, including the services, members, values, and arguments, so a mistake is reported before anything moves.
 - A sequence stops at the first failed step unless that step has `continue_on_error`.
 - It is stopped after `max_duration_s` seconds: 60 by default and 600 at most.
 - At most 200 steps, 2000 runs counting repeats, and 8 sequences running at once.
+
+`wait_until` reads a wire or property every `check_every_s` seconds (0.05 by default) until its value matches `condition`, and fails if `timeout_s` passes first, giving the last value it read:
+
+```json
+{ "action": "wait_until", "service": "left_arm.robot", "name": "robot_state", "timeout_s": 5,
+  "condition": { "joint_position.0": { "$gte": 0.29 }, "controller_state.name": "motor_on" } }
+```
+
+The condition is a MongoDB query, which models already know, evaluated by [mingo](https://github.com/kofrasa/mingo) against the same JSON that `read_wire` or `get_property` returns. A JSON object, such as a structure, is queried by its fields. Any other value, such as a number or an array, is queried as `value`, as in `{ "value.0": { "$gt": 0.5 } }`. `$expr` arithmetic works, for example to check that a joint is within a tolerance of its target. Scripts are turned off, and `$where`, `$function`, `$accumulator`, and regular expressions are refused, so a condition cannot run code or take unbounded time. Conditions are checked with the other steps before a sequence starts.
 
 `robotraconteur_sequence_status` reports the state (`running`, `completed`, `failed`, `cancelled`, or `timed_out`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
 

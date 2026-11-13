@@ -25,6 +25,7 @@
     },
     "dependencies": {
         "@modelcontextprotocol/server": "2.4.0",
+        "mingo": "7.2.7",
         "robotraconteur": "0.1.0",
         "robotraconteur-node": "0.1.0",
         "zod": "4.6.7"

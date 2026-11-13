@@ -617,6 +617,69 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(status.elapsed_s >= 0.5 && status.elapsed_s < 1, String(status.elapsed_s));
     });
 
+    test("wait_until waits for a robot to pass a position during a motion", async () =>
+    {
+        const service = "robot_a.robot";
+        const move = await ok(bridge, "robotraconteur_start_sequence", { steps: [{ action: "robot_move_joints", service, joint_position: [0.4, 0, 0, 0, 0, 0], duration_s: 2 }] });
+        const watch = await ok(bridge, "robotraconteur_start_sequence", {
+            steps: [{
+                action: "wait_until", service, name: "robot_state", timeout_s: 10,
+                condition: { "joint_position.0": { $gte: 0.3 }, "controller_state.name": "motor_on" }
+            }, { action: "read_wire", service, name: "robot_state" }]
+        });
+        const status = await finish(watch.sequence_id);
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        const waited = status.results[0].result;
+        assert.equal(waited.matched, true);
+        assert.ok(waited.value.joint_position[0] >= 0.3 && waited.value.joint_position[0] < 0.4, String(waited.value.joint_position[0]));
+        // The motion eases in and out, so it passes 0.3 of 0.4 two thirds of the way through
+        assert.ok(waited.waited_s > 0.8 && waited.waited_s < 1.9, `waited ${waited.waited_s} s`);
+        assert.equal((await finish(move.sequence_id)).state, "completed");
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+    });
+
+    test("wait_until conditions use $expr, query other values as value, and time out with the last value", async () =>
+    {
+        await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.2, 0.4, 0.6] });
+        const near = { $expr: { $lt: [{ $abs: { $subtract: [{ $arrayElemAt: ["$value", 1] }, 0.4] } }, 0.01] } };
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            steps: [
+                { action: "wait_until", service: "reynard", name: "color", condition: near, timeout_s: 2 },
+                { action: "wait_until", service: "reynard", name: "color", condition: { "value.0": { $gt: 5 } }, timeout_s: 0.3, check_every_s: 0.1 }
+            ]
+        });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "failed");
+        assert.equal(status.results[0].result.matched, true);
+        assert.deepEqual(status.results[0].result.value, [0.2, 0.4, 0.6]);
+        assert.match(status.results[1].error, /not met within 0\.3 seconds\. The last value of color was \[0\.2,0\.4,0\.6\]/);
+        assert.ok(status.results[1].duration_s >= 0.3 && status.results[1].duration_s < 0.6, String(status.results[1].duration_s));
+        await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.929, 0.49, 0.192] });
+    });
+
+    test("wait_until conditions are checked before starting, and cannot run code", async () =>
+    {
+        const base = { action: "wait_until", service: "reynard", name: "color", timeout_s: 1 };
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { $where: "true" } }] }, /\$where is not allowed in a condition/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { $expr: { $function: { body: "x", args: [], lang: "js" } } } }] }, /\$function is not allowed/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { value: { $regex: "a" } } }] }, /\$regex is not allowed/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /not a valid MongoDB query: .*\$bogus/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {} }] }, /needs timeout_s/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, name: "teleport", condition: {} }] }, /"teleport" is a function, not a wire or property/);
+    });
+
+    test("cancelling stops a wait_until at once", async () =>
+    {
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            steps: [{ action: "wait_until", service: "reynard", name: "color", condition: { "value.0": { $gt: 5 } }, timeout_s: 30 }]
+        });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const started = Date.now();
+        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        assert.equal(cancelled.state, "cancelled");
+        assert.ok(Date.now() - started < 1000, "the wait stops promptly");
+    });
+
     test("long result lists are returned over several calls", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {

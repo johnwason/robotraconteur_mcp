@@ -120,13 +120,19 @@ export class BridgeTools
 
     /**
      * Check that a member can be used as a tool would use it, converting the value or arguments given
-     * for it, without using it. "service" only checks that the service can be reached, and "robot"
-     * checks for a standard robot that robot_move_joints can move
+     * for it, without using it. "service" only checks that the service can be reached, "readable"
+     * checks for a wire or property, and "robot" checks for a standard robot that robot_move_joints
+     * can move
      */
-    async check(service: string, object: string | undefined, kind: "service" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
+    async check(service: string, object: string | undefined, kind: "service" | "readable" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
     {
         const stub = await this.registry.resolve(service, object);
         if (kind === "service") return;
+        if (kind === "readable")
+        {
+            member(stub, name, ["wire", "property"]);
+            return;
+        }
         if (kind === "robot")
         {
             member(stub, "execute_trajectory", ["function"]);
@@ -265,6 +271,15 @@ export class BridgeTools
         const m = member(stub, name, ["wire"]);
         const { value, timestamp } = await stub.peekWireInValue(name);
         return { value: encode(stub, value, m.type), timestamp: this.timestamp(timestamp) };
+    }
+
+    /** The latest value of a wire, or the value of a property, as the JSON the model is shown */
+    async readValue(service: string, object: string | undefined, name: string): Promise<unknown>
+    {
+        const stub = await this.registry.resolve(service, object);
+        const m = member(stub, name, ["wire", "property"]);
+        const value = m.kind === "wire" ? (await stub.peekWireInValue(name)).value : await stub.getProperty(name);
+        return encode(stub, value, m.type);
     }
 
     async writeWire(service: string, object: string | undefined, name: string, value: unknown): Promise<Record<string, unknown>>

@@ -16,10 +16,11 @@
 // trips through the model. A sequence is started, followed with its status, and can be cancelled.
 
 import { performance } from "node:perf_hooks";
+import { compileCondition } from "./condition.js";
 import { errorText } from "./errors.js";
 import type { BridgeTools } from "./tools.js";
 
-export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait"] as const;
+export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until"] as const;
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number];
 
 /** One step of a sequence, with the arguments of the tool its action is named after */
@@ -37,6 +38,8 @@ export interface SequenceStep
     joint_position?: number[];
     duration_s?: number;
     seconds?: number;
+    condition?: Record<string, unknown>;
+    check_every_s?: number;
     clear?: boolean;
     limit?: number;
     at_s?: number;
@@ -62,7 +65,11 @@ export const SEQUENCE_LIMITS = {
 const MAX_STATUS_BYTES = 64 * 1024;
 const MAX_STATUS_RESULTS = 200;
 /** Actions that stop by themselves when the sequence is aborted */
-const SIGNALLED: SequenceAction[] = ["wait", "call_function", "robot_move_joints"];
+const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "robot_move_joints"];
+/** How often wait_until reads its value unless the step says otherwise */
+const DEFAULT_CHECK_EVERY_S = 0.05;
+/** The most of the last value shown when a wait_until times out */
+const LAST_VALUE_CHARS = 1000;
 /** A step that starts later than its time by more than this reports how late it was */
 const LATE_REPORTED_S = 0.005;
 
@@ -313,6 +320,14 @@ export class SequenceRunner
             if (step.limit !== undefined && !(Number.isInteger(step.limit) && step.limit > 0 && step.limit <= 200)) throw new Error("limit must be a whole number from 1 to 200.");
             await this.tools.check(service, undefined, "service", "");
             break;
+        case "wait_until":
+            need("name");
+            need("condition");
+            if (!(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
+            if (step.check_every_s !== undefined && !(step.check_every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`check_every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
+            compileCondition(step.condition);
+            await this.tools.check(service, step.object, "readable", step.name!);
+            break;
         case "robot_move_joints":
             need("joint_position");
             if (!(typeof step.duration_s === "number" && step.duration_s > 0 && step.duration_s <= 100)) throw new Error("The robot_move_joints action needs duration_s, more than 0 and at most 100.");
@@ -346,6 +361,29 @@ export class SequenceRunner
             return (await this.tools.readEvents(s, step.clear ?? true, step.limit ?? 50)).events;
         case "robot_move_joints":
             return await this.tools.robotMoveJoints(s, step.object, step.joint_position!, step.duration_s!, signal);
+        case "wait_until":
+            return await this.waitUntil(step, signal);
+        }
+    }
+
+    /** Read a wire or property until its value meets the condition, or fail when timeout_s passes */
+    private async waitUntil(step: SequenceStep, signal: AbortSignal): Promise<unknown>
+    {
+        const test = compileCondition(step.condition);
+        const started = performance.now();
+        const deadline = started + step.timeout_s! * 1000;
+        const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
+        for (;;)
+        {
+            const checked = performance.now();
+            const value = await this.tools.readValue(step.service!, step.object, step.name!);
+            if (test(value)) return { matched: true, waited_s: round((performance.now() - started) / 1000), value };
+            if (performance.now() >= deadline)
+            {
+                const last = JSON.stringify(value);
+                throw new Error(`The condition was not met within ${step.timeout_s} seconds. The last value of ${step.name} was ${last.length > LAST_VALUE_CHARS ? last.slice(0, LAST_VALUE_CHARS) + "..." : last}`);
+            }
+            await sleep(Math.min(checked + every, deadline) - performance.now(), signal);
         }
     }
 
