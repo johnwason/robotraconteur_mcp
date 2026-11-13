@@ -42,7 +42,7 @@ The computer must be on the same network as the devices. Discovery listens on UD
 | `robotraconteur_get_property`, `robotraconteur_set_property` | Read and write properties |
 | `robotraconteur_call_function` | Call a function. Generators run to completion |
 | `robotraconteur_read_wire`, `robotraconteur_write_wire` | Get or set the latest value of a wire |
-| `robotraconteur_read_events` | Return events the service has sent |
+| `robotraconteur_read_events` | Return events the service has sent, oldest first, optionally only those of one name, with the server's current time |
 | `robotraconteur_robot_move_joints` | Move a standard robot smoothly to joint positions |
 | `robotraconteur_start_sequence` | Start a timed sequence of steps and return its ID immediately |
 | `robotraconteur_sequence_status`, `robotraconteur_cancel_sequence` | Follow a sequence and get its results, or stop it |
@@ -51,31 +51,108 @@ Services are named by `robotraconteur_discover` as `node.service`, and a name st
 
 ### Timed sequences
 
-Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of steps and returns a `sequence_id` straight away:
+Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of `sequences`, usually one, each with its steps, and returns their `sequence_id` values straight away:
 
 ```json
 {
-    "steps": [
-        { "action": "call_function", "service": "reynard", "name": "say", "arguments": ["Watch this"] },
-        { "action": "wait", "seconds": 2 },
-        { "action": "robot_move_joints", "service": "left_arm.robot", "joint_position": [0.3, 0, 0, 0, 0, 0], "duration_s": 2 },
-        { "action": "read_wire", "service": "left_arm.robot", "name": "robot_state", "repeat": { "count": 10, "every_s": 0.1 } },
-        { "action": "set_property", "service": "reynard", "name": "color", "value": [0, 1, 0], "at_s": 8 }
-    ],
-    "max_duration_s": 30
+    "sequences": [{
+        "steps": [
+            { "action": "call_function", "service": "reynard", "name": "say", "arguments": ["Watch this"] },
+            { "action": "wait", "seconds": 2 },
+            { "action": "robot_move_joints", "service": "left_arm.robot", "joint_position": [0.3, 0, 0, 0, 0, 0], "duration_s": 2 },
+            { "action": "read_wire", "service": "left_arm.robot", "name": "robot_state", "repeat": { "count": 10, "every_s": 0.1 } },
+            { "action": "set_property", "service": "reynard", "name": "color", "value": [0, 1, 0], "at_s": 8 }
+        ],
+        "max_duration_s": 30
+    }]
 }
 ```
 
-- Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`.
-- Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later. `repeat` runs a step `count` times, `every_s` apart.
+Each entry of `sequences` has `steps`, and optionally `label`, `service` for its steps that do not name one, `on_stop`, and `max_duration_s`. `wait_s` and `detail` apply to the whole call, and the result gives each sequence in order. Sequences started in one call start at the same instant on one clock, so their `at_s` and `after` times line up across them, which is how to move several robots together. Every step of every sequence is checked first, and if any is wrong, none start. Once started, each runs on its own: it has its own `sequence_id`, and stopping, cancelling, or failing one does not affect the others. With `stop_together: true` on the call, they are tied instead: when any of them ends without completing, because it failed, timed out, was stopped, or was cancelled, every other one still running is stopped at once, before the ended one's `on_stop` runs. Each stopped one has state `stopped`, runs its own `on_stop`, and has `stopped_by` with `stop_together: true` and the `sequence_id`, `label`, `state`, and `sequence_error` of the one that ended, which its `on_stop` can query through `_sequence`. Use it when the sequences only make sense together, such as robots that move as one.
+
+- Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`, and `wait_until`, described below.
+- Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later, so steps with the same `at_s` run one after another, in order.
+- `at` starts a step at an absolute ISO 8601 time on the server clock, the clock `started`, `now`, and event times use. Steps with the same `at` start together, even in different sequences, which synchronizes robots on separate services. `max_late`, also an absolute time, is the latest the step may start, and defaults to `at`. A step that comes up after it, because earlier steps overran or the sequence started late, fails rather than starting late. A step that comes up in time waits and starts on time, give or take a few milliseconds of timer jitter, and up to 20 ms past its latest start still counts as in time, since getting from one step to the next takes a millisecond or two. `at` cannot be used with `at_s` or `after`, must not be in the past, and must be within `max_duration_s`. `at_s` works the same way: `max_late_s` is the deadline in seconds, counted as `at_s` is, from the start of the sequence or with `after` from that step's end, and it defaults to `at_s`. So a step with `at` or `at_s` starts on time or fails, and a later `max_late` or `max_late_s` lets it start late. A step without either starts when the previous one finishes and has no deadline. To fall back when a timed step fails, give it `continue_on_error` and a later step `only_if: { "<label>.ok": false }`. A step with any deadline always reports `late_s`, even when on time, so synchronization can be read directly.
+- Steps of one sequence run one after another, so steps with the same `at_s` in one sequence start a few milliseconds apart. For things that must start at the same instant, put them in different sequences of one call, whose steps with the same `at_s` start within a millisecond or two.
+- Within one call, time steps with `at_s`: the call's sequences share its clock, so `at_s: 1` means one second from now in each. Use `at` only to meet sequences started in other calls, or an outside time. A step whose deadline is before the time of an earlier step counted from the same point, which it could only start after, is refused before the sequence starts. Steps with `only_if` are not checked this way, since they may be skipped.
+- A `noop` step does nothing. With `at` and a `label`, it anchors a sequence at an absolute time: later steps use `after` with that label and `at_s`, and `max_late_s` for deadlines, so several sequences can share one start time and keep relative timing. `robotraconteur_sequence_status` without `sequence_id` gives `now`, the server's time, to choose that start time from.
+- `after` names the label of an earlier step, so that `at_s` counts from when that step ended instead of from the start. This keeps timing after a step of unknown length, such as a `wait_until`. Without `at_s`, the step starts as soon as the labelled step has ended. The label must be unique. `repeat` runs a step `count` times, `every_s` apart.
 - A `robot_move_joints` step finishes when the robot arrives. To do something during a motion, such as sampling a wire, start a second sequence; sequences run side by side.
-- A sequence is not for polling, such as repeating `read_wire` to wait for something to happen. It runs a fixed plan and cannot react to what it reads, so `repeat` is for samples at set times. The tool description tells the model this.
 - Every step is checked before the sequence starts, including the services, members, values, and arguments, so a mistake is reported before anything moves.
+- A step may only use the fields of its action, so a field the action would ignore is reported rather than silently dropped.
+- `service` on the sequence applies to the steps that do not name one.
+- `wait_s` on `robotraconteur_start_sequence` waits up to 30 seconds for the sequence to finish and answers as `robotraconteur_sequence_status` does, so a short sequence, or a wait for an event, takes one call.
 - A sequence stops at the first failed step unless that step has `continue_on_error`.
 - It is stopped after `max_duration_s` seconds: 60 by default and 600 at most.
 - At most 200 steps, 2000 runs counting repeats, and 8 sequences running at once.
 
-`robotraconteur_sequence_status` reports the state (`running`, `completed`, `failed`, `cancelled`, or `timed_out`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
+`wait_until` reads a wire or property every `check_every_s` seconds (0.05 by default) until its value matches `condition`, and checks events as soon as they arrive, and fails if `timeout_s` passes first, giving the last value it read. It can also wait for an event, described below:
+
+```json
+{ "action": "wait_until", "service": "left_arm.robot", "name": "robot_state", "timeout_s": 5,
+  "condition": { "joint_position.0": { "$gte": 0.29 }, "controller_state.name": "motor_on" } }
+```
+
+The condition is a MongoDB query, which models already know, evaluated by [mingo](https://github.com/kofrasa/mingo) against the same JSON that `read_wire` or `get_property` returns. A JSON object, such as a structure, is queried by its fields. Any other value, such as a number or an array, is queried as `value`, as in `{ "value": { "$gt": 0.5 } }`, or an array element, as in `{ "value.0": { "$gte": 0.8 } }`. `$expr` arithmetic works, for example to check that a joint is within a tolerance of its target. Scripts are turned off, and `$where`, `$function`, `$accumulator`, and regular expressions are refused, so a condition cannot run code or take unbounded time. Conditions are checked with the other steps before a sequence starts.
+
+Values appear as the read tools show them, which matters when writing a condition:
+
+| Type | JSON | Matching it |
+| --- | --- | --- |
+| Enum | `{ "value": 2, "name": "halt" }` | `{ "command_mode.name": "halt" }` |
+| 64-bit integer | A decimal string, such as `"9007199254740993"` | `$gt` and `$lt` compare it as text, so use `{ "$expr": { "$gt": [{ "$toDouble": "$count" }, 100] } }` |
+| Complex number | `{ "real": 1, "imag": 0 }` | `{ "z.real": { "$gt": 0 } }` |
+| Map | An object keyed by strings | `{ "gains.kp": { "$lt": 10 } }` |
+| Very large array | Summarized, with `truncated: true` | Its elements cannot be matched |
+
+`wait_until` on an event, such as Reynard's `new_message`, waits for an event of that name whose arguments match the condition, by parameter name as `robotraconteur_read_events` shows them. `{}` matches any event of that name. The matched event is returned in the step's result and removed from the events that `robotraconteur_read_events` returns, so each is handled once. An event received before the step started and not yet read also counts, so a message that arrives between two sequences is not missed. `new_events_only: true` ignores those, for when a stale event should not end the wait. It applies to the event entries of `watch` too, and a wait that times out says how many earlier events it ignored. In `combine`, an event entry stays met until the step ends, because its event waits unread. Events are collected from the root object of a service once the service has been used by any tool, including `robotraconteur_describe`. `robotraconteur_read_events` returns the oldest first and, with `clear`, removes only the events it returned, reporting how many remain. `name` limits it to one event.
+
+To wait on several things at once, `watch` lists up to 10 entries in place of `name` and `condition`. Each has its own `name`, `condition`, and optionally `service`, `object`, and `key`. Wires, properties, and events on any services can be mixed. By default the step ends as soon as any entry is met. `combine` is a MongoDB query over the entries by key, each `true` or `false`, for other combinations:
+
+A `stop_when` step takes a condition the same way as `wait_until` (`name` and `condition`, or `watch` and `combine`, with `new_events_only` and `check_every_s`), but does not wait. From that step until the sequence ends, it watches in the background. If the condition is met, it stops the sequence as a cancel does, aborting a running generator and halting a robot moved by `robot_move_joints`. The state is then `stopped`, `stopped_by` gives the `stop_when` step and what it saw, and an event that met the condition is taken. Placing it partway through limits it to the steps after it, and a sequence can have several. Within a sequence, an event that an active `stop_when` matches is left for it, so a `wait_until` in the same sequence does not take it and the stop wins. A `stop_when` with `combine` does not hold events back. An `end_stop_when` step ends one early: with `target`, the label of an earlier `stop_when` step, it ends that one, and without it, every one still watching. Its result lists those it ended. Together they guard only the steps between them, such as a celebration within a longer sequence. If what it watches cannot be read, it stops the sequence as well, with an `error`, rather than letting it go on unwatched.
+
+A `stop_when` step only watches while its own sequence runs. To stop all the sequences of one call together, such as a whole show on a "stop" message or a fault, give the call a `stop_when` next to `sequences`, in the same form as the step but with no timing. From the moment the call starts the sequences until all have ended, if its condition is met, every sequence still running is stopped at once, with state `stopped` and `stopped_by` from it (`stop_when: "call"` and its `label`), and each runs its own `on_stop`. It holds back the events it matches from the `wait_until` steps of all the sequences, so it always wins. A `stop_when` in each sequence would not do this: the first to take the event would be the only one to stop.
+
+`on_stop`, next to `steps`, lists steps to run at once if the sequence ends without completing: stopped by `stop_when`, cancelled, timed out, or failed. It is for cleaning up, such as stopping a motion that a function started without waiting, or saying that the show stopped. The steps run in order, each even if another fails, within 10 seconds in all. They cannot wait: `wait`, `wait_until`, `stop_when`, `end_stop_when`, and `robot_move_joints` are refused, and so are `at_s`, `after`, and `repeat`. They are checked with the other steps before the sequence starts, and their results are given in `on_stop`. A cancel returns once they have run. An `on_stop` step's `only_if` can also query `_sequence`, how the sequence ended: `{ state, stopped_by, error }`, with `state` one of `stopped`, `cancelled`, `timed_out`, or `failed`. For example, `{ "_sequence.stopped_by.label": "stop" }` says "Stopped" only when the `stop_when` labelled `stop` fired, and `{ "_sequence.state": "failed" }` handles a failure. `stopped_by` is there only when a `stop_when` fired, and `error` only after a timeout or a failure, so after a cancel neither is, and `$exists` tells them apart. An `on_stop` step without `only_if` runs however the sequence ended. `_sequence` cannot be used in main steps or as a label.
+
+`only_if` on any step, including `on_stop` steps, runs it only if a MongoDB query holds, and otherwise skips it completely, with `skipped: true` in its result. It is decided as soon as the step comes up, so a skipped step does not wait for its `at_s` or `after` time, none of its repeats run, and it does not hold up the steps after it. A skipped step counts as finished when it was skipped, so `after` on it times from then. To time a step from whichever branch ran, time it with `after` on the step both branches follow, such as the `wait_until` they depend on. The query is on the outcomes of earlier labelled steps, by label, each `{ ok, skipped, result, error }`:
+
+```json
+{ "action": "wait_until", "name": "new_message", "condition": {}, "timeout_s": 10, "label": "answer", "continue_on_error": true },
+{ "action": "call_function", "name": "say", "arguments": ["Well done!"], "only_if": { "answer.ok": true } },
+{ "action": "call_function", "name": "say", "arguments": ["Too slow!"], "only_if": { "answer.ok": false } }
+```
+
+A failed step only lets the sequence go on if it has `continue_on_error`. A query can also look at what a step returned, such as `{ "answer.result.event.arguments.message": "yes" }`. To act on a live value, read it in an earlier labelled step, such as `get_property`. `only_if` does not wait, and the labels it uses are checked before the sequence starts: each must belong to one earlier step.
+
+```json
+{ "sequences": [{ "service": "reynard",
+  "steps": [
+    { "action": "stop_when", "name": "new_message", "label": "stop",
+      "condition": { "$expr": { "$eq": [{ "$toLower": { "$trim": { "input": "$message" } } }, "stop"] } } },
+    { "action": "call_function", "name": "say", "arguments": ["Hooray!"] },
+    { "action": "set_property", "name": "color", "value": [0, 1, 0] }
+  ] }] }
+```
+
+```json
+{ "action": "wait_until", "timeout_s": 280,
+  "watch": [
+    { "key": "msg", "service": "reynard", "name": "new_message", "condition": {} },
+    { "key": "fault", "service": "left_arm.robot", "name": "robot_state", "condition": { "controller_state.name": { "$ne": "motor_on" } } }
+  ] }
+```
+
+This ends when a message arrives or the arm leaves `motor_on`, whichever is first. `"combine": { "msg": true, "fault": false }` would instead wait for a message while the arm is still in `motor_on`. An entry's `key` defaults to its `name`, and its `service` to the step's, then the sequence's. The result's `met` lists the keys of the entries that were met, and its `watch` gives each entry by key: whether it was met, the value of a wire or property, and the event of an event entry that was met. Only those events are removed from `robotraconteur_read_events`. An event that arrives while `combine` is not yet satisfied waits in the buffer. Keys used in `combine` are checked against the entries before the sequence starts.
+
+
+`robotraconteur_cancel_sequence` takes `sequence_ids`, a list, so that all the sequences of a call can be cancelled at once. Every id is checked first, and an unknown one cancels nothing.
+
+With `wait_s`, `robotraconteur_sequence_status` and `robotraconteur_start_sequence` normally return when the sequences end or `wait_s` runs out. `until` names a step label, to return as soon as that step has a result, whether it ran, failed, or was skipped, such as to react to an answer in the middle of a show. `until_met` says whether it did.
+
+`robotraconteur_sequence_status` reports the state (`running`; `completed`; `failed`, when a step failed, including a `wait_until` that reached its `timeout_s`; `cancelled`; `stopped`, by a `stop_when` step; or `timed_out`, when the sequence ran past `max_duration_s`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
+
+Results are compact by default: steps that succeeded on time without returning a value, and have no label, are left out. A step counts as on time if it started no more than 0.02 s late, and their number is given as `omitted`. `detail: "full"` gives every step, for example to check the timing of each one. Results also give `started`, when the sequence started, `ended`, when it ended, and `now`, the server's current time. Each step's result also gives its own `started` as an absolute time, so results can be compared across sequences, and a step that missed its deadline gives `late_s`, how late it came up. `elapsed_s` is how long the sequence ran, so it stops when the sequence ends. `robotraconteur_read_events` gives `now` too. These come from the same clock as event times, so the model can tell how long something has run or a message has waited. A `call_function` step's result is the function's return value itself, or for a generator, how it ran and its last results. While a sequence waits for a step's time, `current_step` shows that step with `waiting: true` and its `starts_at_s`. A sequence that was cancelled or timed out gives `stopped`, saying whether a step was stopped or it was between steps, and any sequence that did not complete gives `not_run`, how many step runs never started. `robotraconteur_cancel_sequence` returns all the results so far. A cancelled sequence has no `error`, since `stopped` explains it. Cancelling a sequence that has already finished says so in `cancel`, with when the cancel arrived, and changes nothing. A cancel from the model arrives a turn after the last result, often seconds later, so a stop at a set time or on an event belongs in `max_duration_s` or `stop_when`. `wait_s` counts from when the call arrives, not from the start of the sequence. `wait_s` also works to check partway through a running sequence. A sequence keeps running if the conversation is interrupted. List the sequences to find any still running.
 
 An optional JSON file, passed as the first argument, can limit what is used:
 
@@ -101,7 +178,7 @@ The tests and builds run inside an isolated podman container, on an internal net
 
 [GitHub Actions](.github/workflows/ci.yml) runs the same tests on every push and pull request, builds the bundle, and tests it. The bundle and its license file are kept as the `robotraconteur-mcp` artifact of each run.
 
-The tests drive the real server over stdio with the MCP client, against Reynard, two simulated robots using the standard Robot type, and Core's test service.
+The tests drive the real server over stdio with the MCP client, against Reynard, two simulated robots using the standard Robot type, and Core's test service. Reynard runs as `test/services/instrumented_reynard.py`, which adds a `reynard_diagnostics` service to send chat messages as if typed in the web page and to log what Reynard is asked to do, so tests of chat and timing need no person. [Testing with an AI client](TESTING_WITH_AI.md) describes it.
 
 ## Running a demo
 

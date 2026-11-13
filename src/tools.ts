@@ -16,7 +16,7 @@ import { RobotRaconteurError } from "robotraconteur";
 import type { GeneratorHandle, MemberDefinition, ServiceStub } from "robotraconteur";
 import { Codec } from "./codec.js";
 import { describeObject } from "./describe.js";
-import type { ServiceRegistry } from "./registry.js";
+import type { ReceivedEvent, ServiceRegistry } from "./registry.js";
 
 /** Tool results larger than this are sent with their large arrays summarized */
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -45,6 +45,14 @@ function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinit
     if (m && kinds.includes(m.kind)) return m;
     if (m) throw new Error(`"${name}" is ${withArticle(m.kind)}, not ${withArticle(kinds.join(" or "))}. ${TOOL_FOR_KIND[m.kind] ?? `There is no tool for using ${withArticle(m.kind)}.`}`);
     throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use robotraconteur_describe to list its members.`);
+}
+
+/** robot_move_joints needs a standard robot. Says which type is needed and what the service is instead */
+function robotMember(stub: ServiceStub): MemberDefinition
+{
+    const m = stub.context.findMember(stub.objectType, "execute_trajectory");
+    if (m && m.kind === "function") return m;
+    throw new Error(`robot_move_joints needs a standard robot, com.robotraconteur.robotics.robot.Robot, with an execute_trajectory function, but this is ${stub.objectType}. Use robotraconteur_describe to see how to move it.`);
 }
 
 function scope(stub: ServiceStub)
@@ -123,13 +131,18 @@ export class BridgeTools
      * for it, without using it. "service" only checks that the service can be reached, and "robot"
      * checks for a standard robot that robot_move_joints can move
      */
-    async check(service: string, object: string | undefined, kind: "service" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
+    async check(service: string, object: string | undefined, kind: "service" | "event" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
     {
         const stub = await this.registry.resolve(service, object);
         if (kind === "service") return;
+        if (kind === "event")
+        {
+            member(stub, name, ["event"]);
+            return;
+        }
         if (kind === "robot")
         {
-            member(stub, "execute_trajectory", ["function"]);
+            robotMember(stub);
             return;
         }
         const m = member(stub, name, [kind]);
@@ -267,6 +280,48 @@ export class BridgeTools
         return { value: encode(stub, value, m.type), timestamp: this.timestamp(timestamp) };
     }
 
+    /** Whether a member is a wire, property, or event, for wait_until. Events are only collected on the root object */
+    async watchedKind(service: string, object: string | undefined, name: string): Promise<"wire" | "property" | "event">
+    {
+        const stub = await this.registry.resolve(service, object);
+        const m = member(stub, name, ["wire", "property", "event"]);
+        if (m.kind === "event" && object) throw new Error(`Events are only collected from the root object of a service, so wait_until cannot watch "${name}" of ${object}.`);
+        return m.kind as "wire" | "property" | "event";
+    }
+
+    /** The oldest event of this name received from a service whose arguments pass the test, left in place */
+    /** Call a function whenever any service sends an event, until the returned function is called */
+    onEvent(listener: () => void): () => void
+    {
+        return this.registry.onEvent(listener);
+    }
+
+    findEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
+    {
+        return this.registry.findEvent(service, event, test, since);
+    }
+
+    /** How many unread events of this name, received before a time in milliseconds, pass the test */
+    countEarlierEvents(service: string, event: string, test: (args: Record<string, unknown>) => boolean, before: number): number
+    {
+        return this.registry.countEarlierEvents(service, event, test, before);
+    }
+
+    /** Remove an event found with findEvent */
+    removeEvent(service: string, event: ReceivedEvent): void
+    {
+        this.registry.removeEvent(service, event);
+    }
+
+    /** The latest value of a wire, or the value of a property, as the JSON the model is shown */
+    async readValue(service: string, object: string | undefined, name: string): Promise<unknown>
+    {
+        const stub = await this.registry.resolve(service, object);
+        const m = member(stub, name, ["wire", "property"]);
+        const value = m.kind === "wire" ? (await stub.peekWireInValue(name)).value : await stub.getProperty(name);
+        return encode(stub, value, m.type);
+    }
+
     async writeWire(service: string, object: string | undefined, name: string, value: unknown): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
@@ -275,9 +330,19 @@ export class BridgeTools
         return { ok: true };
     }
 
-    readEvents(service: string, clear: boolean, limit: number): Record<string, unknown>
+    /**
+     * The oldest events received, optionally only those of one event, removing them with clear. Also
+     * gives now, the server's current time, from the same clock as the events' times
+     */
+    async readEvents(service: string, clear: boolean, limit: number, event?: string): Promise<Record<string, unknown>>
     {
-        return { ...this.registry.takeEvents(service, clear, limit) };
+        if (event !== undefined) member(await this.registry.resolve(service), event, ["event"]);
+        const { events, remaining, dropped } = this.registry.takeEvents(service, clear, limit, event);
+        // now is from the same clock as the events' times, so the model can tell how long they have waited
+        const out: Record<string, unknown> = { events, remaining, now: new Date().toISOString() };
+        if (dropped > 0) out.dropped = dropped;
+        if (remaining > 0) out.note = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting. Call again to get ${remaining === 1 ? "it" : "them"}.`;
+        return out;
     }
 
     /** Move a standard robot to joint positions, building a trajectory that meets the driver's rules */
@@ -300,7 +365,7 @@ export class BridgeTools
     private async moveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
-        member(stub, "execute_trajectory", ["function"]);
+        robotMember(stub);
 
         const state = async () => (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array };
         const start = Array.from((await state()).joint_position);

@@ -75,6 +75,8 @@ export class ServiceRegistry
     private discovery: NodeDiscovery;
     private found: ServiceInfo2Subscription | null = null;
     private connected = new Map<string, ConnectedService>();
+    /** Called when any service sends an event, so that waits on events can check at once */
+    private event_listeners = new Set<() => void>();
     /** The name given to each service, by node ID and service name. Names never change once given */
     private names = new Map<string, string>();
     private search_until = 0;
@@ -226,6 +228,7 @@ export class ServiceRegistry
                     service.events.shift();
                     service.droppedEvents++;
                 }
+                for (const l of [...this.event_listeners]) l();
             });
         }
     }
@@ -281,18 +284,55 @@ export class ServiceRegistry
         return o;
     }
 
-    /** Return the events received so far. The first call starts connecting to the service */
-    takeEvents(name: string, clear: boolean, limit: number): { events: ReceivedEvent[]; dropped: number }
+    /**
+     * The oldest event received with this name whose arguments pass the test, if there is one, left in
+     * place. Events received before the call count, so one that arrived just before is not missed,
+     * unless since, a time in milliseconds, leaves out those received before it
+     */
+    findEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
+    {
+        return this.connect(name).events.find((e) => e.event === event && (since === undefined || Date.parse(e.time) >= since) && test(e.arguments));
+    }
+
+    /** Call a function whenever any service sends an event, until the returned function is called */
+    onEvent(listener: () => void): () => void
+    {
+        this.event_listeners.add(listener);
+        return () => this.event_listeners.delete(listener);
+    }
+
+    /** How many unread events with this name, received before a time in milliseconds, pass the test */
+    countEarlierEvents(name: string, event: string, test: (args: Record<string, unknown>) => boolean, before: number): number
+    {
+        return this.connect(name).events.filter((e) => e.event === event && Date.parse(e.time) < before && test(e.arguments)).length;
+    }
+
+    /** Remove an event found with findEvent, so that read_events does not return it again */
+    removeEvent(name: string, event: ReceivedEvent): void
+    {
+        const events = this.connect(name).events;
+        const i = events.indexOf(event);
+        if (i >= 0) events.splice(i, 1);
+    }
+
+    /**
+     * Return the oldest events received, up to limit, and only those named event if it is given. With
+     * clear, the returned events are removed, so the next call returns the ones after them. The first
+     * call starts connecting to the service
+     */
+    takeEvents(name: string, clear: boolean, limit: number, event?: string): { events: ReceivedEvent[]; remaining: number; dropped: number }
     {
         const service = this.connect(name);
-        const events = service.events.slice(-limit);
+        const matching = service.events.filter((e) => event === undefined || e.event === event);
+        const events = matching.slice(0, limit);
         const dropped = service.droppedEvents;
         if (clear)
         {
-            service.events.length = 0;
+            const taken = new Set(events);
+            service.events = service.events.filter((e) => !taken.has(e));
             service.droppedEvents = 0;
         }
-        return { events, dropped };
+        return { events, remaining: matching.length - (clear ? events.length : 0), dropped };
     }
 
     /** Describe known services as JSON */
