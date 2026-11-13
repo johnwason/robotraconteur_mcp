@@ -70,8 +70,8 @@ const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "rob
 const DEFAULT_CHECK_EVERY_S = 0.05;
 /** The most of the last value shown when a wait_until times out */
 const LAST_VALUE_CHARS = 1000;
-/** A step that starts later than its time by more than this reports how late it was */
-const LATE_REPORTED_S = 0.005;
+/** A step that starts later than its time by more than this reports how late it was. Less is timer jitter */
+const LATE_REPORTED_S = 0.02;
 
 interface StepResult
 {
@@ -400,7 +400,10 @@ export class SequenceRunner
                 for (let k = 0; k < count; k++)
                 {
                     const scheduled = base + k * (step.repeat?.every_s ?? 0);
-                    await sleep((scheduled - sequence.elapsed) * 1000, signal);
+                    // A step that is already due starts now, rather than after a timer
+                    const delay = scheduled - sequence.elapsed;
+                    if (delay > 0) await sleep(delay * 1000, signal);
+                    else if (signal.aborted) throw signal.reason;
                     const started = sequence.elapsed;
                     sequence.current = { step: i, iteration: step.repeat ? k : undefined };
                     const entry: StepResult = { step: i, iteration: step.repeat ? k : undefined, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
