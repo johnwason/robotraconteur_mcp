@@ -662,7 +662,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(done.state, "completed");
         const late = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id: done.sequence_id });
         assert.equal(late.state, "completed");
-        assert.match(late.cancel, /The sequence had already completed before this cancel, so nothing was cancelled/);
+        assert.match(late.cancel, /The sequence had already completed before this cancel, so nothing was cancelled\. The cancel arrived [\d.]+ s after it ended, [\d.]+ s into the sequence/);
     });
 
     test("two sequences run side by side, sampling a robot while it moves", async () =>

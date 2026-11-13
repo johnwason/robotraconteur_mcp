@@ -474,7 +474,8 @@ export class SequenceRunner
         if (sequence.state !== "running")
         {
             const state = sequence.state.replace("_", " ");
-            return { ...this.report(sequence, 0), cancel: `The sequence had already ${sequence.state === "cancelled" ? "been cancelled" : state} before this cancel, so nothing was cancelled.` };
+            const late = sequence.finished_s !== undefined ? ` The cancel arrived ${round(sequence.elapsed - sequence.finished_s)} s after it ended, ${round(sequence.elapsed)} s into the sequence.` : "";
+            return { ...this.report(sequence, 0), cancel: `The sequence had already ${sequence.state === "cancelled" ? "been cancelled" : state} before this cancel, so nothing was cancelled.${late}` };
         }
         sequence.controller.abort(new SequenceStopped("cancelled", "The sequence was cancelled"));
         await sequence.done;
