@@ -541,7 +541,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
             { action: "wait", seconds: 0.1 },
             { action: "call_function", name: "teleport", arguments: [0, 0], label: "home" },
             { action: "get_property", name: "color" },
-            { action: "wait", seconds: 0.1, at_s: 0 }
+            // Late, which a later max_late_s allows
+            { action: "wait", seconds: 0.1, at_s: 0, max_late_s: 5 }
         ];
         const compact = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", wait_s: 10, steps });
         assert.equal(compact.state, "completed", JSON.stringify(compact));
@@ -618,12 +619,20 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("a step that cannot start on time reports how late it was", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
-            steps: [{ action: "wait", seconds: 0.3 }, { action: "get_property", service: "reynard", name: "color", at_s: 0.1 }]
+            steps: [{ action: "wait", seconds: 0.3 }, { action: "get_property", service: "reynard", name: "color", at_s: 0.1, max_late_s: 2 }]
         });
         const status = await finish(sequence_id);
         assert.equal(status.state, "completed");
         assert.equal(status.results[0].late_s, undefined);
         assert.ok(Math.abs(status.results[1].late_s - 0.2) < 0.05, JSON.stringify(status.results[1]));
+
+        // Without max_late_s, which defaults to at_s, the late step fails rather than run late
+        const strict = await ok(bridge, "robotraconteur_start_sequence", {
+            wait_s: 10,
+            steps: [{ action: "wait", seconds: 0.3 }, { action: "get_property", service: "reynard", name: "color", at_s: 0.1, label: "late" }]
+        });
+        assert.equal(strict.state, "failed", JSON.stringify(strict));
+        assert.match(strict.results.find((r: any) => r.label === "late").error, /after its latest start time/);
     });
 
     test("cancelling stops a robot partway and halts it", async () =>

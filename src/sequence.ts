@@ -910,9 +910,11 @@ export class SequenceRunner
                 const base = step.at !== undefined ? (Date.parse(step.at) - sequence.started.getTime()) / 1000
                     : step.after !== undefined ? label_end.get(step.after)! + (step.at_s ?? 0) : step.at_s ?? previous_end;
                 // The latest a run may start, as an absolute time: max_late, or at if not given
-                // max_late_s counts as at_s does, from the start of the sequence or with after, from that step's end
+                // max_late_s counts as at_s does, from the start of the sequence or with after, from that step's
+                // end, and defaults to at_s, as max_late defaults to at, so a timed step starts on time or fails
+                const latest_s = step.max_late_s ?? step.at_s;
                 const latest = step.max_late !== undefined ? Date.parse(step.max_late)
-                    : step.max_late_s !== undefined ? sequence.started.getTime() + ((step.after !== undefined ? label_end.get(step.after)! : 0) + step.max_late_s) * 1000
+                    : latest_s !== undefined ? sequence.started.getTime() + ((step.after !== undefined ? label_end.get(step.after)! : 0) + latest_s) * 1000
                         : step.at !== undefined ? Date.parse(step.at) : undefined;
                 const count = step.repeat?.count ?? 1;
                 for (let k = 0; k < count; k++)
