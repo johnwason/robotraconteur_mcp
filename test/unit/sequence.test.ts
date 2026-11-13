@@ -136,3 +136,15 @@ test("the configuration file is checked", () =>
     writeFileSync(wrong, JSON.stringify({ services: [{ name: "a" }] }));
     assert.throws(() => loadConfig(wrong), /not valid.*url/s);
 });
+
+test("only_if finds labels in field paths, not in the arguments of expression operators", async () =>
+{
+    const { runner: r } = runner();
+    const answer = call("quick", { label: "answer" });
+    const trimmed = { $expr: { $eq: [{ $toLower: { $trim: { input: { $toString: { $ifNull: ["$answer.ok", ""] } } } } }, "true"] } };
+    const started = await r.start([{ steps: [answer, call("quick", { only_if: trimmed, label: "ran" })] }] as SequenceSpec[], 2, "full") as { sequences: { state: string; results: { label?: string; skipped?: boolean }[] }[] };
+    assert.equal(started.sequences[0]!.state, "completed", JSON.stringify(started));
+    assert.equal(started.sequences[0]!.results.find((x) => x.label === "ran")?.skipped, undefined, "the query held, so the step ran");
+    await assert.rejects(r.start([{ steps: [answer, call("quick", { only_if: { $expr: { $eq: ["$other.ok", true] } } })] }] as SequenceSpec[]), /"other", which is not the label of an earlier step/);
+    await assert.rejects(r.start([{ steps: [answer, call("quick", { only_if: { $or: [{ "answer.ok": true }, { "missing.ok": true }] } })] }] as SequenceSpec[]), /"missing"/);
+});

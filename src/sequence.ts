@@ -284,21 +284,25 @@ function sleepOrEvent(ms: number, signal: AbortSignal, tools: BridgeTools): Prom
 
 /** Settle with the action, or with the abort reason as soon as the signal aborts */
 /** The field names a combine query refers to: the first part of each field path, wherever it appears */
-function combineFields(x: unknown, out = new Set<string>()): Set<string>
+function combineFields(x: unknown, out = new Set<string>(), within: "query" | "expr" = "query"): Set<string>
 {
+    // A field is a key of the query itself, such as "answer.ok", or a "$path" string inside $expr. The
+    // names of an operator's arguments, such as $trim's input, and the contents of a value being
+    // matched, such as the fields of $elemMatch, are not fields of the query
     if (Array.isArray(x))
     {
-        for (const v of x) combineFields(v, out);
+        for (const v of x) combineFields(v, out, within);
     }
     else if (typeof x === "object" && x !== null)
     {
         for (const [k, v] of Object.entries(x))
         {
-            if (!k.startsWith("$")) out.add(k.split(".")[0]!);
-            combineFields(v, out);
+            if (within === "expr" || k === "$expr") combineFields(v, out, "expr");
+            else if (k.startsWith("$")) combineFields(v, out, "query");
+            else out.add(k.split(".")[0]!);
         }
     }
-    else if (typeof x === "string" && x.startsWith("$") && !x.startsWith("$$"))
+    else if (within === "expr" && typeof x === "string" && x.startsWith("$") && !x.startsWith("$$"))
     {
         // A field path in $expr, such as "$msg"
         out.add(x.slice(1).split(".")[0]!);
