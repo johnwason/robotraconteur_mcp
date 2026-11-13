@@ -687,7 +687,8 @@ export class SequenceRunner
         if (!p.step.watch)
         {
             const o = outcomes[0]!;
-            return p.kinds[0] === "event" ? { matched: true, waited_s, event: o.event } : { matched: true, waited_s, value: o.value };
+            // How long after the event arrived it was matched, which is at most about check_every_s
+            return p.kinds[0] === "event" ? { matched: true, waited_s, event_to_match_s: round((Date.now() - Date.parse(o.event!.time)) / 1000), event: o.event } : { matched: true, waited_s, value: o.value };
         }
         return {
             matched: true,

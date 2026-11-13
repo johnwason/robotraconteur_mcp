@@ -1048,8 +1048,9 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
         const status = await finish(sequence_id);
         assert.equal(status.state, "completed", JSON.stringify(status));
-        const { event } = status.results[0].result;
+        const { event, event_to_match_s } = status.results[0].result;
         assert.equal(event.event, "ev2");
+        assert.ok(event_to_match_s >= 0 && event_to_match_s < 0.2, `matched soon after the event: ${event_to_match_s}`);
         assert.equal(event.arguments.d1, 7);
         // The matched event was taken, and the other is still there for read_events
         const left = (await ok(bridge, "robotraconteur_read_events", { service })).events.filter((e: { event: string }) => e.event === "ev2");
