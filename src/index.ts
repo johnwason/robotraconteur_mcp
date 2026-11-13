@@ -43,9 +43,9 @@ const name = (kind: string) => z.string().describe(`Name of the ${kind}, as list
 const step = z.strictObject({
     action: z.enum(SEQUENCE_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name, such as name and value for set_property, or joint_position and duration_s for robot_move_joints. wait takes seconds. wait_until takes name, condition, and timeout_s"),
     label: z.string().optional().describe("A name for the step, shown in its results"),
-    service: z.string().optional().describe("The service, for every action but wait. Steps can use different services"),
+    service: z.string().optional().describe("The service, for every action but wait. Defaults to the service of the sequence. Steps can use different services"),
     object: z.string().optional().describe("Path to a sub object. Leave unset for the root object"),
-    name: z.string().optional().describe("The property, function, or wire. For wait_until, the wire, property, or event to watch"),
+    name: z.string().optional().describe("The property, function, or wire. For wait_until, the wire, property, or event to watch. For read_events, only return events with this name"),
     value: z.unknown().optional().describe("For set_property and write_wire, the value in JSON"),
     arguments: z.unknown().optional().describe("For call_function, an array of arguments or an object keyed by parameter name"),
     generator_inputs: z.array(z.unknown()).optional().describe("For call_function of a generator that takes a value at each step"),
@@ -53,7 +53,7 @@ const step = z.strictObject({
     joint_position: z.array(z.number()).optional().describe("For robot_move_joints, the target position of every joint"),
     duration_s: z.number().positive().max(100).optional().describe("For robot_move_joints, how long the motion should take in seconds"),
     seconds: z.number().min(0).optional().describe("For wait, how long to wait"),
-    condition: z.record(z.string(), z.unknown()).optional().describe("For wait_until, a MongoDB query that the value must match, using the JSON that read_wire or get_property returns. For an event, it is matched against the event's arguments by parameter name, as read_events shows them, and {} matches any event of that name. A JSON object, such as a structure, is queried by its fields, such as { \"joint_position.0\": { \"$gte\": 0.29 } } or { \"controller_state.name\": \"motor_on\" }. Any other value, such as a number or an array, is queried as value, such as { \"value\": { \"$gt\": 0.5 } }. $expr arithmetic works, such as to compare within a tolerance. $where and regular expressions are not allowed"),
+    condition: z.record(z.string(), z.unknown()).optional().describe("For wait_until, a MongoDB query that the value must match, using the JSON that read_wire or get_property returns. For an event, it is matched against the event's arguments by parameter name, as read_events shows them, and {} matches any event of that name. Values are JSON as the read tools show them: an enum is { value, name }, so match its name, such as { \"command_mode.name\": \"halt\" }; a 64-bit integer is a decimal string, which $gt and $lt compare as text, so compare it as a number with $toDouble in $expr, such as { \"$expr\": { \"$gt\": [{ \"$toDouble\": \"$count\" }, 100] } }; a complex number is { real, imag }; a map is an object keyed by strings; a very large array is summarized, so its elements cannot be matched. A JSON object, such as a structure, is queried by its fields, such as { \"joint_position.0\": { \"$gte\": 0.29 } } or { \"controller_state.name\": \"motor_on\" }. Any other value, such as a number or an array, is queried as value, such as { \"value\": { \"$gt\": 0.5 } }. $expr arithmetic works, such as to compare within a tolerance. $where and regular expressions are not allowed"),
     check_every_s: z.number().min(SEQUENCE_LIMITS.minEvery).optional().describe("For wait_until, how often to read the value. The default is 0.05"),
     clear: z.boolean().optional().describe("For read_events, remove the returned events from the buffer. The default is true"),
     limit: z.number().int().positive().max(200).optional().describe("For read_events, the most events to return. The default is 50"),
@@ -118,13 +118,14 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, ({ service: s, object: o, name: n, value }) => respond(() => tools.writeWire(s, o, n, value)));
 
     server.registerTool("robotraconteur_read_events", {
-        description: "Return events a service has sent, such as a chat message arriving. Events are only collected after a service has first been used, so call this once to begin. To wait for an event rather than checking repeatedly, use a wait_until step of robotraconteur_start_sequence.",
+        description: "Return events a service has sent, such as a chat message arriving, oldest first. Events are collected once the service has been used by any tool, including robotraconteur_describe, so earlier ones are not seen. To wait for an event rather than checking repeatedly, use a wait_until step of robotraconteur_start_sequence.",
         inputSchema: z.object({
             service,
-            clear: z.boolean().optional().describe("Remove the returned events from the buffer. The default is true"),
-            limit: z.number().int().positive().max(200).optional().describe("The most events to return. The default is 50")
+            name: z.string().optional().describe("Only return events with this name, such as new_message"),
+            clear: z.boolean().optional().describe("Remove the returned events from the buffer, so the next call returns the ones after them. The default is true"),
+            limit: z.number().int().positive().max(200).optional().describe("The most events to return, oldest first. The default is 50")
         })
-    }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50)));
+    }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name)));
 
     server.registerTool("robotraconteur_robot_move_joints", {
         description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position.",
@@ -140,19 +141,22 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
         description: `Start a timed sequence of actions and return its sequence_id immediately. The steps run in the server without a round trip through the model, so their timing is exact: such as saying something, waiting 2 seconds, then moving, or reading a wire every 0.1 seconds. Steps can call functions, set properties, read and write wires, read events, move standard robots, and wait, on one or more services. Steps run one at a time: each starts when the previous one finishes, or at at_s seconds from the start if that is later, and repeat runs a step at a fixed interval. A robot_move_joints step finishes when the robot arrives, so to do something during a motion, such as sampling a wire, start a second sequence. To wait for something to happen, such as a robot passing a position, a sensor changing, or an event such as a chat message arriving, use a wait_until step with a condition: it fails if timeout_s passes first. An event that wait_until matches is returned in its result and removed from the events robotraconteur_read_events returns, and one received before the step started also counts, so none is missed between sequences. Do not repeat read_wire to watch for a change, since repeat runs a fixed number of times and cannot react to what it reads; use repeat only when samples at set times are wanted. Every step is checked before anything starts. The sequence stops at the first failed step unless that step has continue_on_error, and is stopped after max_duration_s. Follow it with robotraconteur_sequence_status, and stop it with robotraconteur_cancel_sequence, which aborts a running generator and halts a robot it is moving. Run a long generator as a step, rather than with robotraconteur_call_function, when it may need to be stopped. At most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns} runs counting repeats.`,
         inputSchema: z.object({
             steps: z.array(step).min(1).max(SEQUENCE_LIMITS.maxSteps).describe("The steps, in order"),
+            service: z.string().optional().describe("The service for the steps that do not name one"),
+            wait_s: z.number().min(0).max(SEQUENCE_LIMITS.maxStatusWait).optional().describe("Wait up to this many seconds for the sequence to finish, and answer as robotraconteur_sequence_status does. Use it for short sequences, or to start a wait_until for an event and get the event in one call"),
             max_duration_s: z.number().positive().max(SEQUENCE_LIMITS.maxDuration).optional().describe(`Stop the sequence after this many seconds. The default is ${SEQUENCE_LIMITS.defaultDuration} and the maximum is ${SEQUENCE_LIMITS.maxDuration}`)
         })
-    }, (a) => respond(() => sequences.start(a.steps as SequenceStep[], a.max_duration_s)));
+    }, (a) => respond(() => sequences.start(a.steps as SequenceStep[], a.max_duration_s, a.service, a.wait_s ?? 0)));
 
     server.registerTool("robotraconteur_sequence_status", {
         description: "Report the state of a sequence and the results of its steps so far: running, completed, failed, cancelled, or timed_out. Each result has the step index, when it started in seconds from the start of the sequence, how long it took, how late it started if it was late, and its result or error. Set wait_s to wait for the sequence to finish, up to 30 seconds, rather than calling repeatedly. Results are returned in order, and a long list is split over calls: pass next_index as from_index to get the rest, or only the new ones. Without sequence_id, lists the sequences.",
         inputSchema: z.object({
             sequence_id: z.string().optional().describe("The sequence, from robotraconteur_start_sequence"),
             from_index: z.number().int().min(0).optional().describe("Return results from this index. The default is 0"),
-            wait_s: z.number().min(0).max(SEQUENCE_LIMITS.maxStatusWait).optional().describe("Wait up to this many seconds for the sequence to finish before answering")
+            wait_s: z.number().min(0).max(SEQUENCE_LIMITS.maxStatusWait).optional().describe("Wait up to this many seconds for the sequence to finish before answering"),
+            limit: z.number().int().positive().max(50).optional().describe("Without sequence_id, the most sequences to list, newest first. The default is 10")
         }),
         annotations: { readOnlyHint: true }
-    }, (a) => respond(() => a.sequence_id === undefined ? sequences.list() : sequences.status(a.sequence_id, a.from_index ?? 0, a.wait_s ?? 0)));
+    }, (a) => respond(() => a.sequence_id === undefined ? sequences.list(a.limit ?? 10) : sequences.status(a.sequence_id, a.from_index ?? 0, a.wait_s ?? 0)));
 
     server.registerTool("robotraconteur_cancel_sequence", {
         description: "Stop a running sequence. A generator it is running, such as a trajectory, is aborted on the service, and a robot moved by robot_move_joints is also halted. Returns the sequence's final state and the step that was stopped.",

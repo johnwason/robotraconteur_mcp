@@ -292,18 +292,24 @@ export class ServiceRegistry
         return i < 0 ? undefined : service.events.splice(i, 1)[0];
     }
 
-    /** Return the events received so far. The first call starts connecting to the service */
-    takeEvents(name: string, clear: boolean, limit: number): { events: ReceivedEvent[]; dropped: number }
+    /**
+     * Return the oldest events received, up to limit, and only those named event if it is given. With
+     * clear, the returned events are removed, so the next call returns the ones after them. The first
+     * call starts connecting to the service
+     */
+    takeEvents(name: string, clear: boolean, limit: number, event?: string): { events: ReceivedEvent[]; remaining: number; dropped: number }
     {
         const service = this.connect(name);
-        const events = service.events.slice(-limit);
+        const matching = service.events.filter((e) => event === undefined || e.event === event);
+        const events = matching.slice(0, limit);
         const dropped = service.droppedEvents;
         if (clear)
         {
-            service.events.length = 0;
+            const taken = new Set(events);
+            service.events = service.events.filter((e) => !taken.has(e));
             service.droppedEvents = 0;
         }
-        return { events, dropped };
+        return { events, remaining: matching.length - (clear ? events.length : 0), dropped };
     }
 
     /** Describe known services as JSON */

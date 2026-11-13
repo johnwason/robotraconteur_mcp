@@ -747,6 +747,69 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.match(status.results[1].error, /No ev1 event matching the condition arrived within 0\.3 seconds/);
     });
 
+    test("read_events filters by name, returns the oldest first, and keeps the rest", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        for (const d of [1, 2, 3]) await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [d, 0] });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func1", arguments: [] });
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && (await ok(bridge, "robotraconteur_read_events", { service, clear: false })).events.length < 4) await new Promise((resolve) => setTimeout(resolve, 100));
+
+        const first = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", limit: 2 });
+        assert.deepEqual(first.events.map((e: any) => e.arguments.d1), [1, 2]);
+        assert.equal(first.remaining, 1);
+        assert.match(first.note, /1 more event is waiting/);
+        const second = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" });
+        assert.deepEqual(second.events.map((e: any) => e.arguments.d1), [3]);
+        assert.equal(second.remaining, 0);
+        // The ev1 event was not taken by the reads of ev2
+        assert.deepEqual((await ok(bridge, "robotraconteur_read_events", { service })).events.map((e: any) => e.event), ["ev1"]);
+        await fails(bridge, "robotraconteur_read_events", { service, name: "func1" }, /"func1" is a function, not an event/);
+    });
+
+    test("steps may only use the fields of their action", async () =>
+    {
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "read_events", service: "reynard", seconds: 1 }] }, /The read_events action does not use seconds\. It uses: service, name, clear, limit/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait", seconds: 1, service: "reynard" }] }, /The wait action does not use service/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "read_events", service: "reynard", name: "color" }] }, /"color" is a property, not an event/);
+    });
+
+    test("a sequence can name one service for its steps, and start can wait for the end", async () =>
+    {
+        const status = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            steps: [{ action: "get_property", name: "color" }, { action: "wait", seconds: 0.2 }, { action: "read_wire", name: "state" }]
+        });
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        assert.equal(status.results.length, 3);
+        assert.ok(Array.isArray(status.results[2].result.value.robot_position));
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "get_property", name: "color" }] }, /get_property action needs service/);
+    });
+
+    test("one call starts a wait for an event and returns the event", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const started = Date.now();
+        const listen = ok(bridge, "robotraconteur_start_sequence", { service, wait_s: 20, steps: [{ action: "wait_until", name: "ev2", condition: {}, timeout_s: 20 }] });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [4, 0] });
+        const status = await listen;
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        assert.equal(status.results[0].result.event.arguments.d1, 4);
+        assert.ok(Date.now() - started < 5000, "the call returned when the event arrived");
+    });
+
+    test("the list of sequences is limited, newest first", async () =>
+    {
+        const listed = await ok(bridge, "robotraconteur_sequence_status", { limit: 2 });
+        assert.equal(listed.sequences.length, 2);
+        assert.ok(listed.total > 2);
+        assert.ok(Number(listed.sequences[0].sequence_id.slice(4)) > Number(listed.sequences[1].sequence_id.slice(4)));
+    });
+
     test("cancelling stops a wait_until at once", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {

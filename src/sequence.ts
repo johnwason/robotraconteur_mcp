@@ -49,6 +49,20 @@ export interface SequenceStep
 
 export type SequenceState = "running" | "completed" | "failed" | "cancelled" | "timed_out";
 
+/** The fields each action uses, besides those every step can have */
+const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
+    get_property: ["service", "object", "name"],
+    set_property: ["service", "object", "name", "value"],
+    call_function: ["service", "object", "name", "arguments", "generator_inputs", "timeout_s"],
+    read_wire: ["service", "object", "name"],
+    write_wire: ["service", "object", "name", "value"],
+    read_events: ["service", "name", "clear", "limit"],
+    robot_move_joints: ["service", "object", "joint_position", "duration_s"],
+    wait: ["seconds"],
+    wait_until: ["service", "object", "name", "condition", "timeout_s", "check_every_s"]
+};
+const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "repeat", "continue_on_error"];
+
 /** Limits that keep a mistake in a sequence from running away */
 export const SEQUENCE_LIMITS = {
     maxSteps: 200,
@@ -174,9 +188,14 @@ export class SequenceRunner
 
     constructor(private tools: BridgeTools) {}
 
-    /** Check every step, then start the sequence. Nothing is done if a step is wrong */
-    async start(steps: SequenceStep[], max_duration_s = SEQUENCE_LIMITS.defaultDuration): Promise<Record<string, unknown>>
+    /**
+     * Check every step, then start the sequence. Nothing is done if a step is wrong. service is used
+     * by the steps that do not name one. With wait_s, waits up to that long for the sequence to finish
+     * and reports it as status does
+     */
+    async start(given_steps: SequenceStep[], max_duration_s = SEQUENCE_LIMITS.defaultDuration, service?: string, wait_s = 0): Promise<Record<string, unknown>>
     {
+        const steps = given_steps.map((s) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s);
         const running = [...this.sequences.values()].filter((s) => s.state === "running").length;
         if (running >= SEQUENCE_LIMITS.maxRunning) throw new Error(`${running} sequences are already running. Wait for one to finish, or cancel one with robotraconteur_cancel_sequence.`);
         if (steps.length === 0) throw new Error("A sequence needs at least one step");
@@ -203,6 +222,7 @@ export class SequenceRunner
         this.forgetOld();
         const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${max_duration_s} seconds`)), max_duration_s * 1000);
         sequence.done = this.run(sequence).finally(() => clearTimeout(timeout));
+        if (wait_s > 0) return await this.status(sequence.id, 0, wait_s);
         return {
             sequence_id: sequence.id,
             state: sequence.state,
@@ -239,10 +259,11 @@ export class SequenceRunner
         return this.report(sequence, Math.max(0, sequence.results.length - 1));
     }
 
-    /** The sequences known, newest first */
-    list(): Record<string, unknown>
+    /** The sequences known, newest first, up to limit */
+    list(limit = 10): Record<string, unknown>
     {
-        const sequences = [...this.sequences.values()].reverse().map((s) => ({
+        const all = [...this.sequences.values()].reverse();
+        const sequences = all.slice(0, limit).map((s) => ({
             sequence_id: s.id,
             state: s.state,
             started: s.started.toISOString(),
@@ -250,7 +271,7 @@ export class SequenceRunner
             steps: s.steps.length,
             results: s.results.length
         }));
-        return { sequences };
+        return { sequences, total: all.length, running: all.filter((s) => s.state === "running").length };
     }
 
     /** Stop every running sequence, such as when the server shuts down */
@@ -279,6 +300,8 @@ export class SequenceRunner
     private async check(step: SequenceStep, max_duration_s: number): Promise<void>
     {
         if (!SEQUENCE_ACTIONS.includes(step.action)) throw new Error(`Unknown action "${String(step.action)}". Use one of: ${SEQUENCE_ACTIONS.join(", ")}.`);
+        const unused = Object.keys(step).filter((k) => step[k as keyof SequenceStep] !== undefined && !COMMON_FIELDS.includes(k as keyof SequenceStep) && !ACTION_FIELDS[step.action].includes(k as keyof SequenceStep));
+        if (unused.length > 0) throw new Error(`The ${step.action} action does not use ${unused.join(", ")}. It uses: ${ACTION_FIELDS[step.action].join(", ")}.`);
         if (step.at_s !== undefined && !(step.at_s >= 0 && step.at_s < max_duration_s)) throw new Error("at_s must be at least 0 and less than max_duration_s.");
         if (step.repeat)
         {
@@ -318,7 +341,8 @@ export class SequenceRunner
             break;
         case "read_events":
             if (step.limit !== undefined && !(Number.isInteger(step.limit) && step.limit > 0 && step.limit <= 200)) throw new Error("limit must be a whole number from 1 to 200.");
-            await this.tools.check(service, undefined, "service", "");
+            if (step.name !== undefined) await this.tools.check(service, undefined, "event", step.name);
+            else await this.tools.check(service, undefined, "service", "");
             break;
         case "wait_until":
             need("name");
@@ -358,7 +382,7 @@ export class SequenceRunner
             await this.tools.writeWire(s, step.object, step.name!, step.value);
             return null;
         case "read_events":
-            return (await this.tools.readEvents(s, step.clear ?? true, step.limit ?? 50)).events;
+            return (await this.tools.readEvents(s, step.clear ?? true, step.limit ?? 50, step.name)).events;
         case "robot_move_joints":
             return await this.tools.robotMoveJoints(s, step.object, step.joint_position!, step.duration_s!, signal);
         case "wait_until":

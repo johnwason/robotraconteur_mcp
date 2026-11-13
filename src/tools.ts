@@ -123,10 +123,15 @@ export class BridgeTools
      * for it, without using it. "service" only checks that the service can be reached, and "robot"
      * checks for a standard robot that robot_move_joints can move
      */
-    async check(service: string, object: string | undefined, kind: "service" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
+    async check(service: string, object: string | undefined, kind: "service" | "event" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
     {
         const stub = await this.registry.resolve(service, object);
         if (kind === "service") return;
+        if (kind === "event")
+        {
+            member(stub, name, ["event"]);
+            return;
+        }
         if (kind === "robot")
         {
             member(stub, "execute_trajectory", ["function"]);
@@ -299,9 +304,15 @@ export class BridgeTools
         return { ok: true };
     }
 
-    readEvents(service: string, clear: boolean, limit: number): Record<string, unknown>
+    /** The oldest events received, optionally only those of one event, removing them with clear */
+    async readEvents(service: string, clear: boolean, limit: number, event?: string): Promise<Record<string, unknown>>
     {
-        return { ...this.registry.takeEvents(service, clear, limit) };
+        if (event !== undefined) member(await this.registry.resolve(service), event, ["event"]);
+        const { events, remaining, dropped } = this.registry.takeEvents(service, clear, limit, event);
+        const out: Record<string, unknown> = { events, remaining };
+        if (dropped > 0) out.dropped = dropped;
+        if (remaining > 0) out.note = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting. Call again to get ${remaining === 1 ? "it" : "them"}.`;
+        return out;
     }
 
     /** Move a standard robot to joint positions, building a trajectory that meets the driver's rules */
