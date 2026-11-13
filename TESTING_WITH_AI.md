@@ -63,7 +63,7 @@ Whether the model can work out what to do is the point of this test, more than w
 - Does it use `robotraconteur_describe` before acting, or guess at names?
 - Does it call `robotraconteur_discover` again when `searching` is true, or conclude that nothing is there?
 - Does it use a sequence when timing matters, and `wait_s` rather than calling `robotraconteur_sequence_status` over and over?
-- Does it use `wait_until` to wait for something to happen, rather than repeating `read_wire`? Are its conditions written against the fields `read_wire` returns?
+- Are its `wait_until` conditions written against the fields `read_wire` returns?
 - The service definition gives no units for `teleport`. Does it use meters, as the server instructions say Robot Raconteur assumes, or ask?
 - When a call fails, does the error message tell it enough to fix the call?
 - Which tools did it ignore or misuse? Their descriptions are in `src/index.ts`.

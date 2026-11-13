@@ -69,7 +69,6 @@ Each tool call is a round trip through the model, which takes seconds and varies
 - Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`, and `wait_until`, described below.
 - Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later. `repeat` runs a step `count` times, `every_s` apart.
 - A `robot_move_joints` step finishes when the robot arrives. To do something during a motion, such as sampling a wire, start a second sequence; sequences run side by side.
-- To wait for something to happen, the model uses `wait_until`, not a repeated `read_wire`. `repeat` runs a fixed number of times and cannot react to what it reads, so it is for samples at set times. The tool description tells the model this.
 - Every step is checked before the sequence starts, including the services, members, values, and arguments, so a mistake is reported before anything moves.
 - A step may only use the fields of its action, so a field the action would ignore is reported rather than silently dropped.
 - `service` on the sequence applies to the steps that do not name one.
