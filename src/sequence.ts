@@ -326,7 +326,7 @@ export class SequenceRunner
             if (!(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
             if (step.check_every_s !== undefined && !(step.check_every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`check_every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
             compileCondition(step.condition);
-            await this.tools.check(service, step.object, "readable", step.name!);
+            await this.tools.watchedKind(service, step.object, step.name!);
             break;
         case "robot_move_joints":
             need("joint_position");
@@ -366,13 +366,27 @@ export class SequenceRunner
         }
     }
 
-    /** Read a wire or property until its value meets the condition, or fail when timeout_s passes */
+    /**
+     * Read a wire or property until its value meets the condition, or wait for an event whose
+     * arguments meet it, which is then removed from the events read_events returns. Fails when
+     * timeout_s passes
+     */
     private async waitUntil(step: SequenceStep, signal: AbortSignal): Promise<unknown>
     {
         const test = compileCondition(step.condition);
         const started = performance.now();
         const deadline = started + step.timeout_s! * 1000;
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
+        if (await this.tools.watchedKind(step.service!, step.object, step.name!) === "event")
+        {
+            for (;;)
+            {
+                const event = this.tools.takeEvent(step.service!, step.name!, test);
+                if (event) return { matched: true, waited_s: round((performance.now() - started) / 1000), event };
+                if (performance.now() >= deadline) throw new Error(`No ${step.name} event matching the condition arrived within ${step.timeout_s} seconds.`);
+                await sleep(Math.min(every, deadline - performance.now()), signal);
+            }
+        }
         for (;;)
         {
             const checked = performance.now();

@@ -75,7 +75,7 @@ Each tool call is a round trip through the model, which takes seconds and varies
 - It is stopped after `max_duration_s` seconds: 60 by default and 600 at most.
 - At most 200 steps, 2000 runs counting repeats, and 8 sequences running at once.
 
-`wait_until` reads a wire or property every `check_every_s` seconds (0.05 by default) until its value matches `condition`, and fails if `timeout_s` passes first, giving the last value it read:
+`wait_until` reads a wire or property every `check_every_s` seconds (0.05 by default) until its value matches `condition`, and fails if `timeout_s` passes first, giving the last value it read. It can also wait for an event, described below:
 
 ```json
 { "action": "wait_until", "service": "left_arm.robot", "name": "robot_state", "timeout_s": 5,
@@ -83,6 +83,9 @@ Each tool call is a round trip through the model, which takes seconds and varies
 ```
 
 The condition is a MongoDB query, which models already know, evaluated by [mingo](https://github.com/kofrasa/mingo) against the same JSON that `read_wire` or `get_property` returns. A JSON object, such as a structure, is queried by its fields. Any other value, such as a number or an array, is queried as `value`, as in `{ "value.0": { "$gt": 0.5 } }`. `$expr` arithmetic works, for example to check that a joint is within a tolerance of its target. Scripts are turned off, and `$where`, `$function`, `$accumulator`, and regular expressions are refused, so a condition cannot run code or take unbounded time. Conditions are checked with the other steps before a sequence starts.
+
+`wait_until` on an event, such as Reynard's `new_message`, waits for an event of that name whose arguments match the condition, by parameter name as `robotraconteur_read_events` shows them. `{}` matches any event of that name. The matched event is returned in the step's result and removed from the events that `robotraconteur_read_events` returns, so each is handled once. An event received before the step started also counts, so a message that arrives between two sequences is not missed. Events are collected from the root object of a service, once the service has been used.
+
 
 `robotraconteur_sequence_status` reports the state (`running`, `completed`, `failed`, `cancelled`, or `timed_out`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
 

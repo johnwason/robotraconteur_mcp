@@ -120,19 +120,13 @@ export class BridgeTools
 
     /**
      * Check that a member can be used as a tool would use it, converting the value or arguments given
-     * for it, without using it. "service" only checks that the service can be reached, "readable"
-     * checks for a wire or property, and "robot" checks for a standard robot that robot_move_joints
-     * can move
+     * for it, without using it. "service" only checks that the service can be reached, and "robot"
+     * checks for a standard robot that robot_move_joints can move
      */
-    async check(service: string, object: string | undefined, kind: "service" | "readable" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
+    async check(service: string, object: string | undefined, kind: "service" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
     {
         const stub = await this.registry.resolve(service, object);
         if (kind === "service") return;
-        if (kind === "readable")
-        {
-            member(stub, name, ["wire", "property"]);
-            return;
-        }
         if (kind === "robot")
         {
             member(stub, "execute_trajectory", ["function"]);
@@ -271,6 +265,21 @@ export class BridgeTools
         const m = member(stub, name, ["wire"]);
         const { value, timestamp } = await stub.peekWireInValue(name);
         return { value: encode(stub, value, m.type), timestamp: this.timestamp(timestamp) };
+    }
+
+    /** Whether a member is a wire, property, or event, for wait_until. Events are only collected on the root object */
+    async watchedKind(service: string, object: string | undefined, name: string): Promise<"wire" | "property" | "event">
+    {
+        const stub = await this.registry.resolve(service, object);
+        const m = member(stub, name, ["wire", "property", "event"]);
+        if (m.kind === "event" && object) throw new Error(`Events are only collected from the root object of a service, so wait_until cannot watch "${name}" of ${object}.`);
+        return m.kind as "wire" | "property" | "event";
+    }
+
+    /** Remove and return the oldest event of this name received from a service whose arguments pass the test */
+    takeEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean): Record<string, unknown> | undefined
+    {
+        return this.registry.takeEvent(service, event, test) as unknown as Record<string, unknown> | undefined;
     }
 
     /** The latest value of a wire, or the value of a property, as the JSON the model is shown */

@@ -700,7 +700,51 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { value: { $regex: "a" } } }] }, /\$regex is not allowed/);
         await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /not a valid MongoDB query: .*\$bogus/);
         await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {} }] }, /needs timeout_s/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, name: "teleport", condition: {} }] }, /"teleport" is a function, not a wire or property/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, name: "teleport", condition: {} }] }, /"teleport" is a function, not a wire or property or event/);
+    });
+
+    test("wait_until waits for an event whose arguments match, and takes it from the events", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            steps: [{ action: "wait_until", service, name: "ev2", condition: { d1: { $gt: 5 } }, timeout_s: 10, label: "listen" }]
+        });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [1, 2] });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.equal((await ok(bridge, "robotraconteur_sequence_status", { sequence_id })).state, "running", "an event that does not match is not taken");
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [7, 3] });
+
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        const { event } = status.results[0].result;
+        assert.equal(event.event, "ev2");
+        assert.equal(event.arguments.d1, 7);
+        // The matched event was taken, and the other is still there for read_events
+        const left = (await ok(bridge, "robotraconteur_read_events", { service })).events.filter((e: { event: string }) => e.event === "ev2");
+        assert.deepEqual(left.map((e: { arguments: { d1: number } }) => e.arguments.d1), [1]);
+    });
+
+    test("wait_until counts an event received before it started, and times out when none comes", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func1", arguments: [] });
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && !(await ok(bridge, "robotraconteur_read_events", { service, clear: false })).events.some((e: { event: string }) => e.event === "ev1"))
+        {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            steps: [
+                { action: "wait_until", service, name: "ev1", condition: {}, timeout_s: 2 },
+                { action: "wait_until", service, name: "ev1", condition: {}, timeout_s: 0.3 }
+            ]
+        });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "failed");
+        assert.ok(status.results[0].result.waited_s < 0.2, `the earlier event was found at once: ${status.results[0].result.waited_s}`);
+        assert.match(status.results[1].error, /No ev1 event matching the condition arrived within 0\.3 seconds/);
     });
 
     test("cancelling stops a wait_until at once", async () =>

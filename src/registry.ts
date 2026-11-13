@@ -281,6 +281,17 @@ export class ServiceRegistry
         return o;
     }
 
+    /**
+     * Remove and return the oldest event received with this name whose arguments pass the test, if
+     * there is one. Events received before the call count, so one that arrived just before is not missed
+     */
+    takeEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean): ReceivedEvent | undefined
+    {
+        const service = this.connect(name);
+        const i = service.events.findIndex((e) => e.event === event && test(e.arguments));
+        return i < 0 ? undefined : service.events.splice(i, 1)[0];
+    }
+
     /** Return the events received so far. The first call starts connecting to the service */
     takeEvents(name: string, clear: boolean, limit: number): { events: ReceivedEvent[]; dropped: number }
     {
