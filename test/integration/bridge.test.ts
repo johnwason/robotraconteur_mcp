@@ -561,6 +561,30 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(typeof values.results[0].result, "number", JSON.stringify(values.results[0]));
     });
 
+    test("after times a step from when a labelled step ended", async () =>
+    {
+        const status = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            detail: "full",
+            steps: [
+                { action: "wait", seconds: 0.4, label: "pause" },
+                { action: "get_property", name: "color", at_s: 0.3, after: "pause", label: "timed" },
+                { action: "get_property", name: "color", after: "pause", label: "next" }
+            ]
+        });
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        const [pause, timed, next] = status.results;
+        const pause_end = pause.started_s + pause.duration_s;
+        assert.ok(Math.abs(timed.started_s - (pause_end + 0.3)) < 0.05, `0.3 s after pause ended at ${pause_end}: ${timed.started_s}`);
+        // Its time had passed, since timed ran first, so it is late
+        assert.ok(next.late_s > 0.2, JSON.stringify(next));
+
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 0.1, after: "nothing" }] }, /no earlier step has the label "nothing"/);
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 0.1, after: "later" }, { action: "wait", seconds: 0.1, label: "later" }] }, /no earlier step has the label "later"/);
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 0.1, label: "x" }, { action: "wait", seconds: 0.1, label: "x" }, { action: "wait", seconds: 0.1, after: "x" }] }, /used by more than one step/);
+    });
+
     test("every step is checked before anything starts", async () =>
     {
         const before = (await ok(bridge, "robotraconteur_sequence_status", {})).sequences.length;
@@ -631,6 +655,13 @@ describe("timed sequences", { timeout: 300000 }, () =>
         // The robot is free for the next motion
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
         await fails(bridge, "robotraconteur_cancel_sequence", { sequence_id: "seq-0" }, /Unknown sequence "seq-0"/);
+        const again = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        assert.match(again.cancel, /already been cancelled before this cancel, so nothing was cancelled/);
+        const done = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 5, steps: [{ action: "wait", seconds: 0.1 }] });
+        assert.equal(done.state, "completed");
+        const late = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id: done.sequence_id });
+        assert.equal(late.state, "completed");
+        assert.match(late.cancel, /The sequence had already completed before this cancel, so nothing was cancelled/);
     });
 
     test("two sequences run side by side, sampling a robot while it moves", async () =>

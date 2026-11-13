@@ -66,6 +66,7 @@ export interface SequenceStep
     clear?: boolean;
     limit?: number;
     at_s?: number;
+    after?: string;
     repeat?: { count: number; every_s: number };
     continue_on_error?: boolean;
 }
@@ -87,7 +88,7 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     wait: ["seconds"],
     wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"]
 };
-const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "repeat", "continue_on_error"];
+const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "repeat", "continue_on_error"];
 
 /** Limits that keep a mistake in a sequence from running away */
 export const SEQUENCE_LIMITS = {
@@ -266,6 +267,12 @@ export class SequenceRunner
             try
             {
                 runs += step.repeat?.count ?? 1;
+                if (step.after !== undefined)
+                {
+                    const earlier = steps.slice(0, i).filter((s) => s.label === step.after).length;
+                    if (earlier === 0) throw new Error(`after must be the label of an earlier step, and no earlier step has the label "${step.after}".`);
+                    if (steps.filter((s) => s.label === step.after).length > 1) throw new Error(`The label "${step.after}" is used by more than one step, so after cannot tell which one is meant. Give the steps different labels.`);
+                }
                 await this.check(step, max_duration_s);
             }
             catch (e)
@@ -310,11 +317,13 @@ export class SequenceRunner
     async cancel(id: string): Promise<Record<string, unknown>>
     {
         const sequence = this.get(id);
-        if (sequence.state === "running")
+        if (sequence.state !== "running")
         {
-            sequence.controller.abort(new SequenceStopped("cancelled", "The sequence was cancelled"));
-            await sequence.done;
+            const state = sequence.state.replace("_", " ");
+            return { ...this.report(sequence, 0), cancel: `The sequence had already ${sequence.state === "cancelled" ? "been cancelled" : state} before this cancel, so nothing was cancelled.` };
         }
+        sequence.controller.abort(new SequenceStopped("cancelled", "The sequence was cancelled"));
+        await sequence.done;
         return this.report(sequence, 0);
     }
 
@@ -601,11 +610,14 @@ export class SequenceRunner
     {
         const signal = sequence.controller.signal;
         let previous_end = 0;
+        // When each labelled step ended, for the steps timed from it with after
+        const label_end = new Map<string, number>();
         try
         {
             for (const [i, step] of sequence.steps.entries())
             {
-                const base = step.at_s ?? previous_end;
+                // at_s counts from the start of the sequence, or with after, from when that step ended
+                const base = step.after !== undefined ? label_end.get(step.after)! + (step.at_s ?? 0) : step.at_s ?? previous_end;
                 const count = step.repeat?.count ?? 1;
                 for (let k = 0; k < count; k++)
                 {
@@ -642,6 +654,7 @@ export class SequenceRunner
                     sequence.results.push(entry);
                 }
                 previous_end = sequence.elapsed;
+                if (step.label !== undefined) label_end.set(step.label, previous_end);
             }
             sequence.state = "completed";
         }
