@@ -9,5 +9,5 @@ RUN /opt/venv/bin/pip install --no-cache-dir \
         "general-robotics-toolbox==0.7.3" "reynard-the-robot==0.3.1" scipy pyyaml
 
 WORKDIR /work/robotraconteur_mcp
-COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund

@@ -87,7 +87,7 @@ It can also list services at known addresses with `"services": [{ "name": "ur5e"
 
 ## Building and testing
 
-`robotraconteur` and `robotraconteur-node` are installed from npm. Build the development images of [robotraconteur_typescript](https://github.com/robotraconteur/robotraconteur_typescript) first, and keep a checkout of it in a folder next to this one, since the tests use its Python test server. Then:
+`robotraconteur` and `robotraconteur-node` are installed from npm. The image is built on the development images of [robotraconteur_typescript](https://github.com/robotraconteur/robotraconteur_typescript), so build those first. Then:
 
 ```sh
 podman build -t rr-ts-mcp-dev .
@@ -98,6 +98,8 @@ podman build -t rr-ts-mcp-dev .
 `npm run bundle` writes `dist-bundle/robotraconteur-mcp.mjs`, along with `THIRD_PARTY_LICENSES.txt` for the packages it includes, which should be distributed with it. Setting `RR_MCP_SERVER=dist-bundle/robotraconteur-mcp.mjs` runs the tests against the bundle instead of the normal build.
 
 The tests and builds run inside an isolated podman container, on an internal network of its own with no route to the host or the internet.
+
+[GitHub Actions](.github/workflows/ci.yml) runs the same tests on every push and pull request, builds the bundle, and tests it. The bundle and its license file are kept as the `robotraconteur-mcp` artifact of each run.
 
 The tests drive the real server over stdio with the MCP client, against Reynard, two simulated robots using the standard Robot type, and Core's test service.
 

@@ -23,7 +23,6 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 const ROOT = process.cwd();
-const SHARED = "/work/robotraconteur_typescript";
 const TEST_SERVICE = "RobotRaconteurTestService";
 const ROBOT_TYPE = "com.robotraconteur.robotics.robot.Robot";
 const processes: ChildProcess[] = [];
@@ -125,7 +124,7 @@ before(async () =>
     await waitForPort(52701);
     start("python3", ["test/services/loopback_robot.py", "--nodename", "robot_b", "--port", "52702"]);
     await waitForPort(52702);
-    start("python3", ["-u", join(SHARED, "test/server/rr_test_server.py")]);
+    start("python3", ["-u", "test/services/rr_test_server.py"]);
     bridge = await startBridge();
     await discover(bridge, ["reynard", "robot_a.robot", "robot_b.robot", TEST_SERVICE]);
 }, { timeout: 180000 });
