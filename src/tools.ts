@@ -282,6 +282,12 @@ export class BridgeTools
     }
 
     /** The oldest event of this name received from a service whose arguments pass the test, left in place */
+    /** Call a function whenever any service sends an event, until the returned function is called */
+    onEvent(listener: () => void): () => void
+    {
+        return this.registry.onEvent(listener);
+    }
+
     findEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
     {
         return this.registry.findEvent(service, event, test, since);

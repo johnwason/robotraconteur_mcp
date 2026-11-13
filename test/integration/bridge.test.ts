@@ -722,7 +722,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
         const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
         assert.equal(cancelled.state, "cancelled");
-        assert.match(cancelled.stopped, /^Between steps: nothing was running\. step 1 \(say 1\) was waiting for its time and did not start/);
+        assert.match(cancelled.stopped, /^Between steps: no step was running, though a motion that an earlier step started without waiting may still be\. step 1 \(say 1\) was waiting for its time and did not start/);
         assert.equal(cancelled.error, undefined, "a cancel is not an error");
         assert.equal(cancelled.not_run, 2);
         // All the results so far, not only the last
@@ -750,7 +750,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(status.stopped_by.label, "guard");
         assert.equal(status.stopped_by.event.arguments.d1, 9);
         assert.ok(status.stopped_by.at_s > 0.5 && status.stopped_by.at_s < 5, String(status.stopped_by.at_s));
-        assert.ok(status.stopped_by.event_to_stop_s >= 0 && status.stopped_by.event_to_stop_s < 0.2, `stopped soon after the event: ${status.stopped_by.event_to_stop_s}`);
+        assert.ok(status.stopped_by.event_to_stop_s >= 0 && status.stopped_by.event_to_stop_s < 0.02, `stopped at once after the event: ${status.stopped_by.event_to_stop_s}`);
         assert.match(status.stopped, /^The sequence was stopped by stop_when steps\[0\] \(guard\), whose condition was met\. During step 1 \(long\), which was stopped/);
         assert.equal(status.not_run, 1);
         assert.equal(status.error, undefined);
@@ -1050,7 +1050,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(status.state, "completed", JSON.stringify(status));
         const { event, event_to_match_s } = status.results[0].result;
         assert.equal(event.event, "ev2");
-        assert.ok(event_to_match_s >= 0 && event_to_match_s < 0.2, `matched soon after the event: ${event_to_match_s}`);
+        // Waits wake when an event arrives, rather than at their next check
+        assert.ok(event_to_match_s >= 0 && event_to_match_s < 0.02, `matched at once after the event: ${event_to_match_s}`);
         assert.equal(event.arguments.d1, 7);
         // The matched event was taken, and the other is still there for read_events
         const left = (await ok(bridge, "robotraconteur_read_events", { service })).events.filter((e: { event: string }) => e.event === "ev2");

@@ -78,7 +78,7 @@ Each tool call is a round trip through the model, which takes seconds and varies
 - It is stopped after `max_duration_s` seconds: 60 by default and 600 at most.
 - At most 200 steps, 2000 runs counting repeats, and 8 sequences running at once.
 
-`wait_until` reads a wire or property every `check_every_s` seconds (0.05 by default) until its value matches `condition`, and fails if `timeout_s` passes first, giving the last value it read. It can also wait for an event, described below:
+`wait_until` reads a wire or property every `check_every_s` seconds (0.05 by default) until its value matches `condition`, and checks events as soon as they arrive, and fails if `timeout_s` passes first, giving the last value it read. It can also wait for an event, described below:
 
 ```json
 { "action": "wait_until", "service": "left_arm.robot", "name": "robot_state", "timeout_s": 5,

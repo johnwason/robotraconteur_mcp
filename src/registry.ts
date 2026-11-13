@@ -75,6 +75,8 @@ export class ServiceRegistry
     private discovery: NodeDiscovery;
     private found: ServiceInfo2Subscription | null = null;
     private connected = new Map<string, ConnectedService>();
+    /** Called when any service sends an event, so that waits on events can check at once */
+    private event_listeners = new Set<() => void>();
     /** The name given to each service, by node ID and service name. Names never change once given */
     private names = new Map<string, string>();
     private search_until = 0;
@@ -226,6 +228,7 @@ export class ServiceRegistry
                     service.events.shift();
                     service.droppedEvents++;
                 }
+                for (const l of [...this.event_listeners]) l();
             });
         }
     }
@@ -289,6 +292,13 @@ export class ServiceRegistry
     findEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
     {
         return this.connect(name).events.find((e) => e.event === event && (since === undefined || Date.parse(e.time) >= since) && test(e.arguments));
+    }
+
+    /** Call a function whenever any service sends an event, until the returned function is called */
+    onEvent(listener: () => void): () => void
+    {
+        this.event_listeners.add(listener);
+        return () => this.event_listeners.delete(listener);
     }
 
     /** How many unread events with this name, received before a time in milliseconds, pass the test */

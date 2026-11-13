@@ -206,6 +206,41 @@ function sleep(ms: number, signal: AbortSignal): Promise<void>
     });
 }
 
+/**
+ * Sleep as sleep does, but wake early when any service sends an event, so that a wait on events
+ * checks at once rather than at its next interval
+ */
+function sleepOrEvent(ms: number, signal: AbortSignal, tools: BridgeTools): Promise<void>
+{
+    return new Promise((resolve, reject) =>
+    {
+        if (signal.aborted)
+        {
+            reject(signal.reason);
+            return;
+        }
+        const done = () =>
+        {
+            clearTimeout(timer);
+            unsubscribe();
+            signal.removeEventListener("abort", stop);
+        };
+        const stop = () =>
+        {
+            done();
+            reject(signal.reason);
+        };
+        const wake = () =>
+        {
+            done();
+            resolve();
+        };
+        const timer = setTimeout(wake, Math.max(0, ms));
+        const unsubscribe = tools.onEvent(wake);
+        signal.addEventListener("abort", stop, { once: true });
+    });
+}
+
 /** Settle with the action, or with the abort reason as soon as the signal aborts */
 function untilAborted<T>(action: Promise<T>, signal: AbortSignal): Promise<T>
 {
@@ -723,7 +758,8 @@ export class SequenceRunner
                 const ignored = p.watches.map((w, i) => p.since !== undefined && p.kinds[i] === "event" ? this.tools.countEarlierEvents(w.service, w.name, w.test, p.since!) : 0);
                 throw new Error(this.notMet(step, p.watches, p.kinds, outcomes, ignored));
             }
-            await sleep(Math.min(checked + every, deadline) - performance.now(), signal);
+            const pause = Math.min(checked + every, deadline) - performance.now();
+            await (p.kinds.includes("event") ? sleepOrEvent(pause, signal, this.tools) : sleep(pause, signal));
         }
     }
 
@@ -770,7 +806,8 @@ export class SequenceRunner
                     sequence.controller.abort(new SequenceStopped("stopped", `The sequence was stopped by ${which}, whose condition was met`));
                     return;
                 }
-                await sleep(checked + every - performance.now(), signal).catch(() => undefined);
+                const pause = checked + every - performance.now();
+                await (p.kinds.includes("event") ? sleepOrEvent(pause, signal, this.tools) : sleep(pause, signal)).catch(() => undefined);
             }
         })();
     }
@@ -964,7 +1001,7 @@ export class SequenceRunner
         {
             const s = sequence.steps[at.step]!;
             const which = `step ${at.step}${at.iteration !== undefined ? ` run ${at.iteration}` : ""} (${s.label ?? s.action})`;
-            const where = at.waiting ? `Between steps: nothing was running. ${which} was waiting for its time and did not start` : `During ${which}, which was stopped`;
+            const where = at.waiting ? `Between steps: no step was running, though a motion that an earlier step started without waiting may still be. ${which} was waiting for its time and did not start` : `During ${which}, which was stopped`;
             report.stopped = sequence.state === "stopped" && sequence.stop_message && sequence.stopped_by?.error === undefined ? `${sequence.stop_message}. ${where}` : where;
         }
         if (sequence.stopped_by) report.stopped_by = sequence.stopped_by;
