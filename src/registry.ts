@@ -282,14 +282,20 @@ export class ServiceRegistry
     }
 
     /**
-     * Remove and return the oldest event received with this name whose arguments pass the test, if
-     * there is one. Events received before the call count, so one that arrived just before is not missed
+     * The oldest event received with this name whose arguments pass the test, if there is one, left in
+     * place. Events received before the call count, so one that arrived just before is not missed
      */
-    takeEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean): ReceivedEvent | undefined
+    findEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean): ReceivedEvent | undefined
     {
-        const service = this.connect(name);
-        const i = service.events.findIndex((e) => e.event === event && test(e.arguments));
-        return i < 0 ? undefined : service.events.splice(i, 1)[0];
+        return this.connect(name).events.find((e) => e.event === event && test(e.arguments));
+    }
+
+    /** Remove an event found with findEvent, so that read_events does not return it again */
+    removeEvent(name: string, event: ReceivedEvent): void
+    {
+        const events = this.connect(name).events;
+        const i = events.indexOf(event);
+        if (i >= 0) events.splice(i, 1);
     }
 
     /**

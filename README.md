@@ -99,6 +99,18 @@ Values appear as the read tools show them, which matters when writing a conditio
 
 `wait_until` on an event, such as Reynard's `new_message`, waits for an event of that name whose arguments match the condition, by parameter name as `robotraconteur_read_events` shows them. `{}` matches any event of that name. The matched event is returned in the step's result and removed from the events that `robotraconteur_read_events` returns, so each is handled once. An event received before the step started also counts, so a message that arrives between two sequences is not missed. Events are collected from the root object of a service once the service has been used by any tool, including `robotraconteur_describe`. `robotraconteur_read_events` returns the oldest first and, with `clear`, removes only the events it returned, reporting how many remain. `name` limits it to one event.
 
+To wait on several things at once, `watch` lists up to 10 entries in place of `name` and `condition`. Each has its own `name`, `condition`, and optionally `service`, `object`, and `key`. Wires, properties, and events on any services can be mixed. By default the step ends as soon as any entry is met. `combine` is a MongoDB query over the entries by key, each `true` or `false`, for other combinations:
+
+```json
+{ "action": "wait_until", "timeout_s": 280,
+  "watch": [
+    { "key": "msg", "service": "reynard", "name": "new_message", "condition": {} },
+    { "key": "fault", "service": "left_arm.robot", "name": "robot_state", "condition": { "controller_state.name": { "$ne": "motor_on" } } }
+  ] }
+```
+
+This ends when a message arrives or the arm leaves `motor_on`, whichever is first. `"combine": { "msg": true, "fault": false }` would instead wait for a message while the arm is still in `motor_on`. An entry's `key` defaults to its `name`, and its `service` to the step's, then the sequence's. The result gives each entry by key: whether it was met, the value of a wire or property, and the event of an event entry that was met. Only those events are removed from `robotraconteur_read_events`. An event that arrives while `combine` is not yet satisfied waits in the buffer. Keys used in `combine` are checked against the entries before the sequence starts.
+
 
 `robotraconteur_sequence_status` reports the state (`running`, `completed`, `failed`, `cancelled`, or `timed_out`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
 

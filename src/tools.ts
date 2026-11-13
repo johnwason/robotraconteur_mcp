@@ -16,7 +16,7 @@ import { RobotRaconteurError } from "robotraconteur";
 import type { GeneratorHandle, MemberDefinition, ServiceStub } from "robotraconteur";
 import { Codec } from "./codec.js";
 import { describeObject } from "./describe.js";
-import type { ServiceRegistry } from "./registry.js";
+import type { ReceivedEvent, ServiceRegistry } from "./registry.js";
 
 /** Tool results larger than this are sent with their large arrays summarized */
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -281,10 +281,16 @@ export class BridgeTools
         return m.kind as "wire" | "property" | "event";
     }
 
-    /** Remove and return the oldest event of this name received from a service whose arguments pass the test */
-    takeEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean): Record<string, unknown> | undefined
+    /** The oldest event of this name received from a service whose arguments pass the test, left in place */
+    findEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean): ReceivedEvent | undefined
     {
-        return this.registry.takeEvent(service, event, test) as unknown as Record<string, unknown> | undefined;
+        return this.registry.findEvent(service, event, test);
+    }
+
+    /** Remove an event found with findEvent */
+    removeEvent(service: string, event: ReceivedEvent): void
+    {
+        this.registry.removeEvent(service, event);
     }
 
     /** The latest value of a wire, or the value of a property, as the JSON the model is shown */

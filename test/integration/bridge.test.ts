@@ -810,6 +810,80 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(Number(listed.sequences[0].sequence_id.slice(4)) > Number(listed.sequences[1].sequence_id.slice(4)));
     });
 
+    test("wait_until with watch ends when any entry is met, across services", async () =>
+    {
+        await ok(bridge, "robotraconteur_read_events", { service: TEST_SERVICE });
+        await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.2, 0.4, 0.6] });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            service: TEST_SERVICE,
+            steps: [{
+                action: "wait_until", timeout_s: 10,
+                watch: [
+                    { key: "big", name: "ev2", condition: { d1: { $gt: 5 } } },
+                    { key: "ping", name: "ev1", condition: {} },
+                    { key: "red", service: "reynard", name: "color", condition: { "value.0": { $gt: 5 } } }
+                ]
+            }]
+        });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await ok(bridge, "robotraconteur_call_function", { service: TEST_SERVICE, name: "func2", arguments: [9, 0] });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        const { watch } = status.results[0].result;
+        assert.equal(watch.big.matched, true);
+        assert.equal(watch.big.event.arguments.d1, 9);
+        assert.deepEqual(watch.ping, { matched: false });
+        assert.equal(watch.red.matched, false);
+        assert.deepEqual(watch.red.value, [0.2, 0.4, 0.6]);
+    });
+
+    test("combine waits for all the entries it needs, and only then takes their events", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.2, 0.2, 0.2] });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            service,
+            steps: [{
+                action: "wait_until", timeout_s: 10,
+                watch: [{ key: "msg", name: "ev2", condition: {} }, { key: "green", service: "reynard", name: "color", condition: { "value.1": { $gte: 0.39 } } }],
+                combine: { msg: true, green: true }
+            }]
+        });
+        // The test service fires the event from a timer, about a second after the call
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [5, 0] });
+        const arrived_by = Date.now() + 10000;
+        while (Date.now() < arrived_by && (await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", clear: false })).events.length === 0) await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.equal((await ok(bridge, "robotraconteur_sequence_status", { sequence_id })).state, "running", "the event alone is not enough");
+        assert.equal((await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", clear: false })).events.length, 1, "the event waits in the buffer");
+
+        await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.2, 0.4, 0.6] });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        assert.equal(status.results[0].result.watch.msg.event.arguments.d1, 5);
+        assert.equal(status.results[0].result.watch.green.matched, true);
+        assert.equal((await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" })).events.length, 0, "the event was taken");
+        await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.929, 0.49, 0.192] });
+    });
+
+    test("watch and combine are checked before starting, and a timeout reports each entry", async () =>
+    {
+        const watch = [{ key: "msg", service: TEST_SERVICE, name: "ev2", condition: {} }, { key: "col", service: "reynard", name: "color", condition: { "value.0": { $gt: 5 } } }];
+        const step = { action: "wait_until", timeout_s: 1, watch };
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, combine: { msg: true, colour: true } }] }, /combine uses colour, which is not a key of watch\. The keys are: msg, col/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, watch: [watch[0], { ...watch[1], key: "msg" }] }] }, /key "msg" is used twice/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, name: "color", condition: {} }] }, /either watch, or name and condition/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {}, timeout_s: 1, combine: { color: true } }] }, /combine needs watch/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, watch: [watch[0], { ...watch[1], name: "teleport" }] }] }, /watch\[1\] \(col\): "teleport" is a function/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, watch: [{ name: "ev2", condition: {} }] }] }, /watch\[0\] needs service/);
+
+        await ok(bridge, "robotraconteur_read_events", { service: TEST_SERVICE });
+        const status = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 10, steps: [{ ...step, timeout_s: 0.3 }] });
+        assert.equal(status.state, "failed");
+        assert.match(status.results[0].error, /The conditions were not met within 0\.3 seconds\. msg: no matching ev2 event; col: not met, last value \[/);
+    });
+
     test("cancelling stops a wait_until at once", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {

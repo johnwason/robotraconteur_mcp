@@ -23,6 +23,26 @@ import type { BridgeTools } from "./tools.js";
 export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until"] as const;
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number];
 
+/** One of the things a wait_until step watches, with its own condition */
+export interface WatchEntry
+{
+    key?: string;
+    service?: string;
+    object?: string;
+    name: string;
+    condition: Record<string, unknown>;
+}
+
+/** A watch entry with its defaults filled in */
+interface Watch
+{
+    key: string;
+    service: string;
+    object?: string;
+    name: string;
+    condition: Record<string, unknown>;
+}
+
 /** One step of a sequence, with the arguments of the tool its action is named after */
 export interface SequenceStep
 {
@@ -39,6 +59,8 @@ export interface SequenceStep
     duration_s?: number;
     seconds?: number;
     condition?: Record<string, unknown>;
+    watch?: WatchEntry[];
+    combine?: Record<string, unknown>;
     check_every_s?: number;
     clear?: boolean;
     limit?: number;
@@ -59,7 +81,7 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     read_events: ["service", "name", "clear", "limit"],
     robot_move_joints: ["service", "object", "joint_position", "duration_s"],
     wait: ["seconds"],
-    wait_until: ["service", "object", "name", "condition", "timeout_s", "check_every_s"]
+    wait_until: ["service", "object", "name", "condition", "watch", "combine", "timeout_s", "check_every_s"]
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "repeat", "continue_on_error"];
 
@@ -80,6 +102,10 @@ const MAX_STATUS_BYTES = 64 * 1024;
 const MAX_STATUS_RESULTS = 200;
 /** Actions that stop by themselves when the sequence is aborted */
 const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "robot_move_joints"];
+/** The most things one wait_until step can watch */
+const MAX_WATCH = 10;
+/** The most of each value shown when a wait_until with watch times out */
+const WATCH_VALUE_CHARS = 300;
 /** How often wait_until reads its value unless the step says otherwise */
 const DEFAULT_CHECK_EVERY_S = 0.05;
 /** The most of the last value shown when a wait_until times out */
@@ -152,6 +178,29 @@ function untilAborted<T>(action: Promise<T>, signal: AbortSignal): Promise<T>
         signal.addEventListener("abort", stop, { once: true });
         action.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
     });
+}
+
+/** The field names a combine query refers to: the first part of each field path, wherever it appears */
+function combineFields(x: unknown, out = new Set<string>()): Set<string>
+{
+    if (Array.isArray(x))
+    {
+        for (const v of x) combineFields(v, out);
+    }
+    else if (typeof x === "object" && x !== null)
+    {
+        for (const [k, v] of Object.entries(x))
+        {
+            if (!k.startsWith("$")) out.add(k.split(".")[0]!);
+            combineFields(v, out);
+        }
+    }
+    else if (typeof x === "string" && x.startsWith("$") && !x.startsWith("$$"))
+    {
+        // A field path in $expr, such as "$msg"
+        out.add(x.slice(1).split(".")[0]!);
+    }
+    return out;
 }
 
 function describeStep(step: SequenceStep, i: number): string
@@ -319,6 +368,11 @@ export class SequenceRunner
             if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error("The wait action needs seconds, from 0 up to max_duration_s.");
             return;
         }
+        if (step.action === "wait_until")
+        {
+            await this.checkWaitUntil(step, max_duration_s);
+            return;
+        }
         need("service");
         const service = step.service!;
         switch (step.action)
@@ -344,20 +398,74 @@ export class SequenceRunner
             if (step.name !== undefined) await this.tools.check(service, undefined, "event", step.name);
             else await this.tools.check(service, undefined, "service", "");
             break;
-        case "wait_until":
-            need("name");
-            need("condition");
-            if (!(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
-            if (step.check_every_s !== undefined && !(step.check_every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`check_every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
-            compileCondition(step.condition);
-            await this.tools.watchedKind(service, step.object, step.name!);
-            break;
         case "robot_move_joints":
             need("joint_position");
             if (!(typeof step.duration_s === "number" && step.duration_s > 0 && step.duration_s <= 100)) throw new Error("The robot_move_joints action needs duration_s, more than 0 and at most 100.");
             if (!Array.isArray(step.joint_position) || !step.joint_position.every((x) => Number.isFinite(x))) throw new Error("joint_position must be an array of numbers.");
             await this.tools.check(service, step.object, "robot", "");
             break;
+        }
+    }
+
+    /** The things a wait_until step watches: its watch entries, or its own name and condition */
+    private watches(step: SequenceStep): Watch[]
+    {
+        if (step.watch === undefined)
+        {
+            if (step.combine !== undefined) throw new Error("combine needs watch.");
+            if (step.name === undefined || step.condition === undefined) throw new Error("The wait_until action needs name and condition, or watch.");
+            if (step.service === undefined) throw new Error("The wait_until action needs service.");
+            return [{ key: step.name, service: step.service, object: step.object, name: step.name, condition: step.condition }];
+        }
+        if (step.name !== undefined || step.condition !== undefined || step.object !== undefined) throw new Error("Give either watch, or name and condition, not both. With watch, name, condition, and object go in each entry.");
+        if (!Array.isArray(step.watch) || step.watch.length === 0 || step.watch.length > MAX_WATCH) throw new Error(`watch must list from 1 to ${MAX_WATCH} entries.`);
+        const keys = new Set<string>();
+        return step.watch.map((w, i) =>
+        {
+            const where = `watch[${i}]`;
+            if (typeof w.name !== "string") throw new Error(`${where} needs name.`);
+            if (w.condition === undefined) throw new Error(`${where} needs condition. Use {} to match any event of that name.`);
+            const service = w.service ?? step.service;
+            if (service === undefined) throw new Error(`${where} needs service, or a service on the step or the sequence.`);
+            const key = w.key ?? w.name;
+            if (key.startsWith("$") || key.includes(".")) throw new Error(`${where} key "${key}" cannot start with $ or contain a dot.`);
+            if (keys.has(key)) throw new Error(`${where} key "${key}" is used twice. Give the entries different keys.`);
+            keys.add(key);
+            return { key, service, object: w.object, name: w.name, condition: w.condition };
+        });
+    }
+
+    private async checkWaitUntil(step: SequenceStep, max_duration_s: number): Promise<void>
+    {
+        if (!(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
+        if (step.check_every_s !== undefined && !(step.check_every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`check_every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
+        const watches = this.watches(step);
+        for (const [i, w] of watches.entries())
+        {
+            const where = step.watch ? `watch[${i}] (${w.key}): ` : "";
+            try
+            {
+                compileCondition(w.condition);
+                await this.tools.watchedKind(w.service, w.object, w.name);
+            }
+            catch (e)
+            {
+                throw new Error(`${where}${errorText(e)}`);
+            }
+        }
+        if (step.combine !== undefined)
+        {
+            const keys = watches.map((w) => w.key);
+            const unknown = [...combineFields(step.combine)].filter((f) => !keys.includes(f));
+            if (unknown.length > 0) throw new Error(`combine uses ${unknown.join(", ")}, which ${unknown.length === 1 ? "is not a key" : "are not keys"} of watch. The keys are: ${keys.join(", ")}.`);
+            try
+            {
+                compileCondition(step.combine);
+            }
+            catch (e)
+            {
+                throw new Error(`combine: ${errorText(e)}`);
+            }
         }
     }
 
@@ -391,38 +499,80 @@ export class SequenceRunner
     }
 
     /**
-     * Read a wire or property until its value meets the condition, or wait for an event whose
-     * arguments meet it, which is then removed from the events read_events returns. Fails when
-     * timeout_s passes
+     * Wait until the watched things meet their conditions: any of them, or as combine says. A wire or
+     * property meets its condition when its latest value does, and an event when one received and not
+     * yet read does. The events that met their conditions are returned and removed from the events
+     * read_events returns. Fails when timeout_s passes
      */
     private async waitUntil(step: SequenceStep, signal: AbortSignal): Promise<unknown>
     {
-        const test = compileCondition(step.condition);
+        const watches = this.watches(step).map((w) => ({ ...w, test: compileCondition(w.condition) }));
+        const kinds = await Promise.all(watches.map((w) => this.tools.watchedKind(w.service, w.object, w.name)));
+        const combine = step.combine ? compileCondition(step.combine) : undefined;
         const started = performance.now();
         const deadline = started + step.timeout_s! * 1000;
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
-        if (await this.tools.watchedKind(step.service!, step.object, step.name!) === "event")
-        {
-            for (;;)
-            {
-                const event = this.tools.takeEvent(step.service!, step.name!, test);
-                if (event) return { matched: true, waited_s: round((performance.now() - started) / 1000), event };
-                if (performance.now() >= deadline) throw new Error(`No ${step.name} event matching the condition arrived within ${step.timeout_s} seconds.`);
-                await sleep(Math.min(every, deadline - performance.now()), signal);
-            }
-        }
         for (;;)
         {
             const checked = performance.now();
-            const value = await this.tools.readValue(step.service!, step.object, step.name!);
-            if (test(value)) return { matched: true, waited_s: round((performance.now() - started) / 1000), value };
-            if (performance.now() >= deadline)
+            const outcomes = await Promise.all(watches.map(async (w, i) =>
             {
-                const last = JSON.stringify(value);
-                throw new Error(`The condition was not met within ${step.timeout_s} seconds. The last value of ${step.name} was ${last.length > LAST_VALUE_CHARS ? last.slice(0, LAST_VALUE_CHARS) + "..." : last}`);
+                if (kinds[i] === "event")
+                {
+                    const event = this.tools.findEvent(w.service, w.name, w.test);
+                    return { matched: event !== undefined, event };
+                }
+                const value = await this.tools.readValue(w.service, w.object, w.name);
+                return { matched: w.test(value), value };
+            }));
+            const met = combine ? combine(Object.fromEntries(watches.map((w, i) => [w.key, outcomes[i]!.matched]))) : outcomes.some((o) => o.matched);
+            if (met)
+            {
+                for (const [i, o] of outcomes.entries())
+                {
+                    if (o.event) this.tools.removeEvent(watches[i]!.service, o.event);
+                }
+                const waited_s = round((performance.now() - started) / 1000);
+                if (!step.watch)
+                {
+                    const o = outcomes[0]!;
+                    return kinds[0] === "event" ? { matched: true, waited_s, event: o.event } : { matched: true, waited_s, value: o.value };
+                }
+                return {
+                    matched: true,
+                    waited_s,
+                    watch: Object.fromEntries(watches.map((w, i) =>
+                    {
+                        const o = outcomes[i]!;
+                        return [w.key, kinds[i] === "event" ? (o.event ? { matched: true, event: o.event } : { matched: false }) : { matched: o.matched, value: o.value }];
+                    }))
+                };
             }
+            if (performance.now() >= deadline) throw new Error(this.notMet(step, watches, kinds, outcomes));
             await sleep(Math.min(checked + every, deadline) - performance.now(), signal);
         }
+    }
+
+    /** Why a wait_until timed out, with the last value of each wire or property */
+    private notMet(step: SequenceStep, watches: Watch[], kinds: string[], outcomes: { matched: boolean; value?: unknown }[]): string
+    {
+        const shown = (v: unknown, chars: number) =>
+        {
+            const text = JSON.stringify(v);
+            return text.length > chars ? text.slice(0, chars) + "..." : text;
+        };
+        if (!step.watch)
+        {
+            if (kinds[0] === "event") return `No ${step.name} event matching the condition arrived within ${step.timeout_s} seconds.`;
+            return `The condition was not met within ${step.timeout_s} seconds. The last value of ${step.name} was ${shown(outcomes[0]!.value, LAST_VALUE_CHARS)}`;
+        }
+        const each = watches.map((w, i) =>
+        {
+            const o = outcomes[i]!;
+            if (kinds[i] === "event") return `${w.key}: ${o.matched ? "a matching event is waiting" : `no matching ${w.name} event`}`;
+            return `${w.key}: ${o.matched ? "met" : "not met"}, last value ${shown(o.value, WATCH_VALUE_CHARS)}`;
+        });
+        return `The ${step.combine ? "combined condition" : "conditions"} ${step.combine ? "was" : "were"} not met within ${step.timeout_s} seconds. ${each.join("; ")}`;
     }
 
     private async run(sequence: Sequence): Promise<void>
