@@ -186,6 +186,26 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.doesNotMatch(timing, /## events/);
         const bad = await call(bridge, "robotraconteur_help", { topics: ["nope"] });
         assert.equal(bad.isError, true);
+        assert.match(bad.content[0]!.text, /category standard_service_types lists them/);
+    });
+
+    test("help gives the standard service definitions' documentation, and describe points to it", async () =>
+    {
+        const list = (await call(bridge, "robotraconteur_help", { category: "standard_service_types" })).content[0]!.text;
+        assert.match(list, /- com\.robotraconteur\.robotics\.robot: /);
+        assert.match(list, /- com\.robotraconteur\.imaging: /);
+        assert.doesNotMatch(list, /## timing/, "a category gives only its own topics");
+        const page = (await call(bridge, "robotraconteur_help", { topics: ["com.robotraconteur.robotics.robot"] })).content[0]!.text;
+        assert.match(page, /## Object: Robot/);
+        assert.match(page, /### Using Statements/, "kept, so other types can be followed to their pages");
+
+        const robot = await ok(bridge, "robotraconteur_describe", { service: "robot_a.robot" });
+        assert.match(robot.standard_docs, /^This uses standard service types.*Read robotraconteur_help topic com\.robotraconteur\.robotics\.robot;/);
+        const trajectory = await ok(bridge, "robotraconteur_describe", { service: "robot_a.robot", member: "execute_trajectory" });
+        assert.match(trajectory.standard_docs, /com\.robotraconteur\.robotics\.trajectory/, "a member's note names the pages of the types it uses");
+        assert.doesNotMatch(trajectory.standard_docs, /robotics\.robot[,;]/);
+        const reynard = await ok(bridge, "robotraconteur_describe", { service: "reynard" });
+        assert.equal(reynard.standard_docs, undefined, "Reynard uses no standard types");
     });
 
     test("finds services and gives them usable names", async () =>

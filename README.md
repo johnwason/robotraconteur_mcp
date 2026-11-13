@@ -45,7 +45,7 @@ The computer must be on the same network as the devices. Discovery listens on UD
 | `robotraconteur_read_events` | Return events the service has sent, oldest first, optionally only those of one name, with the server's current time |
 | `robotraconteur_robot_move_joints` | Move a standard robot smoothly to joint positions |
 | `robotraconteur_start_sequence` | Start a timed sequence of steps and return its ID immediately |
-| `robotraconteur_help` | Detailed help by topic, listed in its description: the rules and examples for sequences |
+| `robotraconteur_help` | Detailed help by category or topic: the rules and examples for sequences, and the documentation of the standard service definitions |
 | `robotraconteur_sequence_status`, `robotraconteur_cancel_sequence` | Follow a sequence and get its results, or stop it |
 
 If the client cancels a tool call, such as when the user presses Esc, a `robotraconteur_robot_move_joints` motion is stopped and the robot halted, and a generator `robotraconteur_call_function` is aborted. A plain function call stops being waited for, but the service finishes it, since a Robot Raconteur call cannot be stopped once sent. `robotraconteur_robot_move_joints` halts the robot whenever the motion does not complete: when it is stopped, fails, or does not finish within `duration_s` plus 30 seconds, which is an error. Only one motion at a time can run on a robot, whichever name it is given by.
@@ -171,6 +171,12 @@ An optional JSON file, passed as the first argument, can limit what is used:
 ```
 
 It can also list services at known addresses with `"services": [{ "name": "ur5e", "url": "rr+tcp://..." }]`, and enable IPv4 discovery with `"ipv4Discovery": true`. The file is checked when the server starts, and a misspelled or unknown setting stops it with an error naming the setting.
+
+### Standard service definitions
+
+Robots, cameras, sensors, and other devices use the standard service definitions, such as `com.robotraconteur.robotics.robot`. Their robdefs carry little documentation, to keep them small on the wire, so `robotraconteur_help` serves it instead: category `standard_service_types` lists them, and each is a topic by its full name, giving its page from [robotraconteur_standard_robdef](https://github.com/robotraconteur/robotraconteur_standard_robdef) `docs/group1`. When `robotraconteur_describe` shows standard types, it adds `standard_docs`, naming the page to read: the object's own for an object, or the pages of the types a member uses.
+
+The pages are copied into `src/standard_docs.ts` from a commit of that repository, recorded in the file. To update them, run `npm run import-standard-docs -- <path to a robotraconteur_standard_robdef checkout>`.
 
 ## Building and testing
 

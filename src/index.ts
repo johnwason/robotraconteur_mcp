@@ -19,7 +19,7 @@ import { errorText } from "./errors.js";
 import { loadConfig, ServiceRegistry } from "./registry.js";
 import { SEQUENCE_ACTIONS, SEQUENCE_LIMITS, SequenceRunner } from "./sequence.js";
 import type { CallStopWhen, SequenceSpec } from "./sequence.js";
-import { HELP_TOPICS, sequenceHelp } from "./sequence_help.js";
+import { help, HELP_CATEGORIES } from "./help.js";
 import { BridgeTools } from "./tools.js";
 
 type Result = Record<string, unknown>;
@@ -190,7 +190,8 @@ Essentials: steps of a sequence run one at a time, in order. Sequences in one ca
     }, (a) => respond(() => sequences.start(a.sequences as SequenceSpec[], a.wait_s ?? 0, a.detail ?? "compact", a.stop_when as CallStopWhen | undefined, a.until, a.stop_together ?? false)));
 
     server.registerTool("robotraconteur_help", {
-        description: `Detailed help, by topic. Call it before writing your first sequence with robotraconteur_start_sequence, and when a rule is unclear. Without topics, gives them all. Topics:
+        description: `Detailed help, by category or topic. Without either, gives the sequences category. Categories:
+sequences: the rules for robotraconteur_start_sequence. Call it before writing your first sequence, and when a rule is unclear. Its topics:
 - actions: what each sequence action takes, the fields any step can use, and the limits
 - timing: at_s, after, at, and the max_late and max_late_s deadlines, and starting several things at the same instant
 - waiting: wait_until, with watch to wait for several things, combine, and check_every_s
@@ -199,10 +200,24 @@ Essentials: steps of a sequence run one at a time, in order. Sequences in one ca
 - on_stop: cleanup steps after an early end, and querying how the sequence ended with _sequence
 - skipping: only_if on the outcomes of earlier labelled steps
 - events: which step takes an event, events received earlier, and new_events_only
-- examples: complete start_sequence calls`,
-        inputSchema: z.object({ topics: z.array(z.enum(HELP_TOPICS)).optional().describe("The topics to give. The default is all") }),
+- examples: complete start_sequence calls
+standard_service_types: lists the standard service definitions that robots, cameras, sensors, and other devices use, such as com.robotraconteur.robotics.robot. Their robdefs carry little documentation, so each one's documentation is a topic by its full name. robotraconteur_describe says which to read.`,
+        inputSchema: z.object({
+            category: z.enum(HELP_CATEGORIES).optional().describe("A category: all the sequence topics, or the list of standard service definitions"),
+            topics: z.array(z.string()).max(10).optional().describe("Topics to give: sequence topics, such as timing, or standard service definitions by full name, such as com.robotraconteur.robotics.robot")
+        }),
         annotations: { readOnlyHint: true }
-    }, (a) => ({ content: [{ type: "text" as const, text: sequenceHelp(a.topics) }] }));
+    }, (a) =>
+    {
+        try
+        {
+            return { content: [{ type: "text" as const, text: help(a.category, a.topics) }] };
+        }
+        catch (e)
+        {
+            return { isError: true, content: [{ type: "text" as const, text: errorText(e) }] };
+        }
+    });
 
     server.registerTool("robotraconteur_sequence_status", {
         description: "Report the state of a sequence and the results of its steps so far: running, completed, failed (a step failed, including a wait_until that reached its timeout_s), cancelled, stopped (a stop_when step's condition was met, given in stopped_by), or timed_out (the sequence ran past max_duration_s). Use wait_s to check partway through a running sequence. wait_s counts from when this call arrives, not from the start of the sequence, so to check at a set time in the sequence, compare elapsed_s. current_step is the step running, or the next one with waiting true while the sequence waits for its starts_at_s. A sequence that was cancelled, stopped, or timed out gives stopped, saying why and where it stopped, and one that did not complete gives not_run, how many step runs never started. started is when the sequence started, ended is when it ended, and now is the server's current time, all from the same clock, and each result gives its own started as an absolute time too. elapsed_s is how long the sequence has run, and stops when it ends, and each result has the step index, when it started in seconds from that time, how long it took, how late it started if it was late, and its result or error. Set wait_s to wait for the sequence to finish, up to 30 seconds, rather than calling repeatedly. Results are returned in order, and a long list is split over calls: pass next_index as from_index to get the rest, or only the new ones. Without sequence_id, lists the sequences, with now, the server's current time.",
