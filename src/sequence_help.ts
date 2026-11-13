@@ -28,6 +28,7 @@ const HELP: Record<HelpTopic, string> = {
 - robot_move_joints (joint_position, duration_s at most 100). It lasts until the robot arrives, so to act during a motion, start a second sequence.
 - wait (seconds). noop does nothing, such as to anchor timing with at.
 - wait_until (name and condition, or watch; timeout_s), stop_when (name and condition, or watch), end_stop_when (target): see waiting and stopping.
+Arguments are fixed when the sequence starts: a step cannot use an earlier step's result, such as putting a received message into a say. To act on a result, branch on it with only_if, or read it in the step's result and start a new sequence.
 Fields for any action: label, at_s, after, at, max_late, max_late_s, only_if, repeat { count, every_s } to run the step several times at a fixed interval, such as to sample a wire, and continue_on_error to go on if the step fails.
 Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns} runs counting repeats per sequence, ${SEQUENCE_LIMITS.maxRunning} sequences running at once, max_duration_s at most ${SEQUENCE_LIMITS.maxDuration} (default ${SEQUENCE_LIMITS.defaultDuration}).`,
 
@@ -49,7 +50,7 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
     conditions: `A condition is a MongoDB query on the JSON that read_wire, get_property, or read_events shows, evaluated by mingo.
 - A structure is queried by its fields, such as { "joint_position.0": { "$gte": 0.29 } } or { "controller_state.name": "motor_on" }.
 - A value that is not a structure, such as a number or an array, is queried as value, such as { "value": { "$gt": 0.5 } }, or an array element, such as { "value.0": { "$gte": 0.8 } }.
-- An event is matched by its arguments, by parameter name, and {} matches any event of that name.
+- An event is matched by its arguments, by parameter name, such as { "message": "stop" }, not by the time, event, and arguments that read_events shows, and {} matches any event of that name.
 - $expr arithmetic works, such as to compare within a tolerance: { "$expr": { "$lt": [{ "$abs": { "$subtract": ["$value", 0.5] } }, 0.01] } }. So do string operators: { "$expr": { "$eq": [{ "$toLower": { "$trim": { "input": "$message" } } }, "stop"] } } matches stop in any case, and { "$expr": { "$gte": [{ "$indexOfBytes": [{ "$toLower": "$message" }, "stop"] }, 0] } } matches a message containing it.
 - Special values: an enum is { value, name }, so match its name, such as { "command_mode.name": "halt" }. A 64-bit integer is a decimal string, which $gt and $lt compare as text, so compare it with $toDouble, such as { "$expr": { "$gt": [{ "$toDouble": "$count" }, 100] } }. A complex number is { real, imag }. A map is an object keyed by strings. A very large array is summarized, so its elements cannot be matched.
 - Allowed: the query operators, and in $expr arithmetic, comparison, logical, conditional, type, string, and simple array operators. Refused: operators that run code ($where, $function), regular expressions, and operators that loop over or build arrays ($map, $filter, $reduce, $range).`,
