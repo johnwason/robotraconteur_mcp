@@ -329,6 +329,31 @@ function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceSte
     }
 }
 
+/**
+ * Refuse a step whose deadline is before the time of an earlier step counted from the same point, the
+ * start of the sequence or the same after label. Steps run one at a time, so it could only start late,
+ * and would fail
+ */
+function checkDeadlines(steps: SequenceStep[]): void
+{
+    // The latest scheduled run so far, for each point that at_s counts from
+    const latest = new Map<string, { at_s: number; index: number }>();
+    for (const [i, step] of steps.entries())
+    {
+        if (step.at_s === undefined || step.at !== undefined || step.only_if !== undefined) continue;
+        const base = step.after === undefined ? "" : step.after;
+        const before = latest.get(base);
+        const deadline = step.max_late_s ?? step.at_s;
+        if (before && deadline < before.at_s)
+        {
+            const s = steps[before.index]!;
+            throw new Error(`${describeStep(step, i)}: its ${step.max_late_s !== undefined ? `max_late_s ${step.max_late_s}` : `at_s ${step.at_s}`} is before ${describeStep(s, before.index)}, due at ${before.at_s}, so it can only start late, and would fail. Give it a later at_s, or a max_late_s.`);
+        }
+        const last = step.at_s + ((step.repeat?.count ?? 1) - 1) * (step.repeat?.every_s ?? 0);
+        if (!before || last > before.at_s) latest.set(base, { at_s: last, index: i });
+    }
+}
+
 /** Milliseconds since 1970 from an ISO 8601 time */
 function parseTime(text: string, field: string): number
 {
@@ -522,6 +547,7 @@ export class SequenceRunner
             }
         }
         if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed`);
+        checkDeadlines(steps);
 
         return { label: spec.label, steps, on_stop, max_duration_s, runs };
     }

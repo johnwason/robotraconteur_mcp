@@ -1162,6 +1162,19 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual(both.sequences.map((s: any) => s.state), ["completed", "completed"]);
     });
 
+    test("a step whose deadline is before an earlier step's time is refused before start", async () =>
+    {
+        const get = { action: "get_property", name: "color" };
+        await failsStart({ service: "reynard", steps: [{ ...get, at_s: 2 }, { ...get, at_s: 1, label: "early" }] }, /steps\[1\] \(get_property early\): its at_s 1 is before steps\[0\] \(get_property color\), due at 2, so it can only start late/);
+        await failsStart({ service: "reynard", steps: [{ ...get, at_s: 0.5, repeat: { count: 3, every_s: 0.5 } }, { ...get, at_s: 1 }] }, /due at 1\.5/);
+        // A later max_late_s, the same time, or a different point to count from are all fine
+        const fine = await startSeq({ service: "reynard", wait_s: 10, steps: [
+            { ...get, at_s: 0.4 }, { ...get, at_s: 0.2, max_late_s: 1 }, { ...get, at_s: 0.4 },
+            { action: "noop", label: "mark" }, { ...get, after: "mark", at_s: 0.1 }
+        ] });
+        assert.equal(fine.state, "completed", JSON.stringify(fine));
+    });
+
     test("a sequence that runs past max_duration_s is stopped", async () =>
     {
         const { sequence_id } = await startSeq({
