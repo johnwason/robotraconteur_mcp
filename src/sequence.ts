@@ -88,6 +88,8 @@ export interface SequenceStep
     limit?: number;
     at_s?: number;
     after?: string;
+    at?: string;
+    max_late?: string;
     only_if?: Record<string, unknown>;
     target?: string;
     repeat?: { count: number; every_s: number };
@@ -113,11 +115,11 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"],
     end_stop_when: ["target"]
 };
-const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "only_if", "repeat", "continue_on_error"];
+const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "at", "max_late", "only_if", "repeat", "continue_on_error"];
 
 /** Actions on_stop cannot use, since they wait, and fields it cannot use, since they schedule */
 const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints"];
-const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "repeat", "continue_on_error"];
+const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "at", "max_late", "repeat", "continue_on_error"];
 /** The most steps on_stop can have, and how long they can take together */
 const MAX_ON_STOP = 20;
 const ON_STOP_LIMIT_S = 10;
@@ -303,6 +305,14 @@ function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceSte
         if (!earlier.some((s) => s.label === label)) throw new Error(`only_if uses "${label}", which is not the label of an earlier step. It queries earlier labelled steps by label, such as { "${label}.ok": true }.`);
         if (all.filter((s) => s.label === label).length > 1) throw new Error(`only_if uses "${label}", which labels more than one step. Give the steps different labels.`);
     }
+}
+
+/** Milliseconds since 1970 from an ISO 8601 time */
+function parseTime(text: string, field: string): number
+{
+    const t = Date.parse(text);
+    if (!Number.isFinite(t) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d/.test(text)) throw new Error(`${field} must be an ISO 8601 time, such as 2026-11-13T09:00:05.000Z, not "${text}".`);
+    return t;
 }
 
 function describeStep(step: SequenceStep, i: number): string
@@ -526,6 +536,19 @@ export class SequenceRunner
         const unused = Object.keys(step).filter((k) => step[k as keyof SequenceStep] !== undefined && !COMMON_FIELDS.includes(k as keyof SequenceStep) && !ACTION_FIELDS[step.action].includes(k as keyof SequenceStep));
         if (unused.length > 0) throw new Error(`The ${step.action} action does not use ${unused.join(", ")}. It uses: ${ACTION_FIELDS[step.action].join(", ")}.`);
         if (step.at_s !== undefined && !(step.at_s >= 0 && step.at_s < max_duration_s)) throw new Error("at_s must be at least 0 and less than max_duration_s.");
+        if (step.at !== undefined)
+        {
+            if (step.at_s !== undefined || step.after !== undefined) throw new Error("at is an absolute time, so it cannot be used with at_s or after.");
+            const at = parseTime(step.at, "at");
+            const now = Date.now();
+            if (at < now) throw new Error(`at, ${step.at}, is ${round((now - at) / 1000)} s in the past. Give a time from now on, such as now plus a margin.`);
+            if (at > now + max_duration_s * 1000) throw new Error(`at, ${step.at}, is ${round((at - now) / 1000)} s from now, after max_duration_s.`);
+        }
+        if (step.max_late !== undefined)
+        {
+            const max_late = parseTime(step.max_late, "max_late");
+            if (step.at !== undefined && max_late < parseTime(step.at, "at")) throw new Error("max_late cannot be before at.");
+        }
         if (step.repeat)
         {
             if (!Number.isInteger(step.repeat.count) || step.repeat.count < 1) throw new Error("repeat.count must be a whole number of at least 1.");
@@ -873,13 +896,32 @@ export class SequenceRunner
                     continue;
                 }
                 // at_s counts from the start of the sequence, or with after, from when that step ended
-                const base = step.after !== undefined ? label_end.get(step.after)! + (step.at_s ?? 0) : step.at_s ?? previous_end;
+                // at is an absolute time, turned into sequence time
+                const base = step.at !== undefined ? (Date.parse(step.at) - sequence.started.getTime()) / 1000
+                    : step.after !== undefined ? label_end.get(step.after)! + (step.at_s ?? 0) : step.at_s ?? previous_end;
+                // The latest a run may start, as an absolute time: max_late, or at if not given
+                const latest = step.max_late !== undefined ? Date.parse(step.max_late) : step.at !== undefined ? Date.parse(step.at) : undefined;
                 const count = step.repeat?.count ?? 1;
                 for (let k = 0; k < count; k++)
                 {
                     const scheduled = base + k * (step.repeat?.every_s ?? 0);
                     // A step that is already due starts now, rather than after a timer
                     const iteration = step.repeat ? k : undefined;
+                    // A run that comes up after its latest time fails rather than starting late. One that
+                    // comes up in time waits and starts on time, give or take timer jitter
+                    if (latest !== undefined)
+                    {
+                        const deadline = latest + k * (step.repeat?.every_s ?? 0) * 1000;
+                        if (Date.now() > deadline)
+                        {
+                            const came = new Date();
+                            const entry: StepResult = { step: i, iteration, action: step.action, label: step.label, started_s: round(sequence.elapsed), duration_s: 0 };
+                            entry.error = `It came up at ${came.toISOString()}, ${round((came.getTime() - deadline) / 1000)} s after its latest start time, ${new Date(deadline).toISOString()}, so it did not run.`;
+                            record(sequence, step, entry);
+                            if (!step.continue_on_error) throw new Error(`${describeStep(step, i)} failed: ${entry.error}`);
+                            continue;
+                        }
+                    }
                     sequence.current = { step: i, iteration, waiting: true, starts_at_s: round(scheduled) };
                     const delay = scheduled - sequence.elapsed;
                     if (delay > 0) await sleep(delay * 1000, signal);

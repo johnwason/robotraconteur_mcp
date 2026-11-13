@@ -1019,6 +1019,50 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
     });
 
+    test("at starts steps of separate sequences at the same absolute time", async () =>
+    {
+        const at = new Date(Date.now() + 1500).toISOString();
+        const a = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "get_property", name: "color", at, label: "a" }] });
+        const b = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "read_wire", name: "state", at, label: "b" }] });
+        const wall = (s: any) => Date.parse(s.started) + s.results[0].started_s * 1000;
+        const ra = await finish(a.sequence_id);
+        const rb = await finish(b.sequence_id);
+        assert.equal(ra.state, "completed", JSON.stringify(ra));
+        assert.equal(rb.state, "completed", JSON.stringify(rb));
+        for (const r of [ra, rb]) assert.ok(wall(r) - Date.parse(at) >= -5 && wall(r) - Date.parse(at) < 15, `started at ${new Date(wall(r)).toISOString()}, for ${at}`);
+        assert.ok(Math.abs(wall(ra) - wall(rb)) < 15, "the two started together");
+    });
+
+    test("a step with at fails rather than start late, unless max_late allows it", async () =>
+    {
+        const soon = () => new Date(Date.now() + 300).toISOString();
+        const late = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            steps: [{ action: "wait", seconds: 0.6 }, { action: "get_property", name: "color", at: soon(), label: "sync" }],
+            on_stop: [{ action: "get_property", name: "color", label: "cleanup" }]
+        });
+        assert.equal(late.state, "failed", JSON.stringify(late));
+        assert.match(late.results.find((r: any) => r.label === "sync").error, /came up at .*, 0\.\d+ s after its latest start time, .*, so it did not run/);
+        assert.ok(Array.isArray(late.on_stop[0].result), "on_stop ran");
+
+        const now = Date.now();
+        const allowed = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            steps: [{ action: "wait", seconds: 0.6 }, { action: "get_property", name: "color", at: new Date(now + 300).toISOString(), max_late: new Date(now + 1000).toISOString(), label: "sync" }]
+        });
+        assert.equal(allowed.state, "completed", JSON.stringify(allowed));
+        assert.ok(allowed.results.find((r: any) => r.label === "sync").late_s > 0.2);
+
+        const get = { action: "get_property", service: "reynard", name: "color" };
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: new Date(Date.now() - 5000).toISOString() }] }, /s in the past/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: soon(), at_s: 1 }] }, /cannot be used with at_s or after/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late: soon() }] }, /max_late cannot be before at/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: "tomorrow" }] }, /at must be an ISO 8601 time/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [get], on_stop: [{ ...get, at: soon() }] }, /cannot use at/);
+    });
+
     test("a sequence that runs past max_duration_s is stopped", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
