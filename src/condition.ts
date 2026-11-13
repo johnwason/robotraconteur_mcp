@@ -84,7 +84,7 @@ export function compileCondition(condition: unknown): (value: unknown) => boolea
         throw new Error("condition must be an object: a MongoDB query, such as { \"joint_position.0\": { \"$gte\": 0.29 } }.");
     }
     const refused = findRefused(condition);
-    if (refused) throw new Error(`${refused} is not allowed in a condition. ${REFUSED_HELP}`);
+    if (refused) throw new Error(`${refused} is not allowed in a condition. ${REFUSED_HELP}${refused.startsWith("$regex") ? ` To match text in any case, use $expr with $toLower, such as { "$expr": { "$eq": [{ "$toLower": "$message" }, "stop"] } }, or to find it within the text, $indexOfBytes, such as { "$expr": { "$gte": [{ "$indexOfBytes": [{ "$toLower": "$message" }, "stop"] }, 0] } }.` : ""}`);
     let query: Query;
     try
     {

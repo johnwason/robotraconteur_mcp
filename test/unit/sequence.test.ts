@@ -148,3 +148,25 @@ test("only_if finds labels in field paths, not in the arguments of expression op
     await assert.rejects(r.start([{ steps: [answer, call("quick", { only_if: { $expr: { $eq: ["$other.ok", true] } } })] }] as SequenceSpec[]), /"other", which is not the label of an earlier step/);
     await assert.rejects(r.start([{ steps: [answer, call("quick", { only_if: { $or: [{ "answer.ok": true }, { "missing.ok": true }] } })] }] as SequenceSpec[]), /"missing"/);
 });
+
+test("a refused sequence names the robotraconteur_help topic that explains it", async () =>
+{
+    const { runner: r } = runner();
+    const refused = async (specs: unknown, topic: string, also?: RegExp) =>
+    {
+        await assert.rejects(r.start(specs as SequenceSpec[]), (e: Error) =>
+        {
+            assert.ok(e.message.endsWith(`See robotraconteur_help topic ${topic}.`), e.message);
+            if (also) assert.match(e.message, also);
+            return true;
+        });
+    };
+    const wait = (condition: unknown) => ({ action: "wait_until", service: "s", name: "new_message", condition, timeout_s: 1 });
+    await refused([{ steps: [wait({ message: { $regex: "stop" } })] }], "conditions", /\$toLower/);
+    await refused([{ steps: [call("quick", { at_s: 2 }), call("quick", { at_s: 1 })] }], "timing");
+    await refused([{ steps: [call("quick", { only_if: { "nope.ok": true } })] }], "skipping");
+    await refused([{ steps: [call("quick")], on_stop: [{ action: "wait", seconds: 1 }] }], "on_stop");
+    await refused([{ steps: [{ action: "wait_until", service: "s", name: "new_message", condition: {} }] }], "waiting");
+    await refused([{ steps: [{ action: "end_stop_when" }] }], "stopping");
+    await refused([{ steps: [{ action: "fly" }] }], "actions");
+});

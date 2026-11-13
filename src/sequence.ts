@@ -310,6 +310,25 @@ function combineFields(x: unknown, out = new Set<string>(), within: "query" | "e
     return out;
 }
 
+/** The robotraconteur_help topic that explains a refused sequence, matched on the error, first match wins */
+const HELP_FOR_ERROR: [RegExp, string][] = [
+    // These list every action or field, so they are matched before the names in them
+    [/Unknown action|does not use/, "actions"],
+    [/is not allowed in a condition|not a valid MongoDB query/, "conditions"],
+    [/only_if/, "skipping"],
+    [/on_stop/, "on_stop"],
+    [/\bat_s\b|max_late|\bafter (must|cannot)|cannot tell which one is meant|\bat, |\bat is an absolute|ISO 8601 time/, "timing"],
+    [/\bwatch\b|combine|timeout_s/, "waiting"],
+    [/stop_when|\btarget\b/, "stopping"],
+    [/action needs|joint_position|repeat|limit must/, "actions"]
+];
+
+function withHelpTopic(message: string): string
+{
+    const topic = HELP_FOR_ERROR.find(([re]) => re.test(message))?.[1];
+    return topic ? `${message} See robotraconteur_help topic ${topic}.` : message;
+}
+
 /** The key an on_stop step's only_if uses for how the sequence ended */
 const SEQUENCE_KEY = "_sequence";
 
@@ -496,6 +515,19 @@ export class SequenceRunner
      * finish, and reports each as status does
      */
     async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact", call_stop?: CallStopWhen, until?: string, stop_together = false): Promise<Record<string, unknown>>
+    {
+        try
+        {
+            return await this.startChecked(specs, wait_s, detail, call_stop, until, stop_together);
+        }
+        catch (e)
+        {
+            // A model that skipped robotraconteur_help is pointed to the topic it needs when it needs it
+            throw new Error(withHelpTopic(errorText(e)));
+        }
+    }
+
+    private async startChecked(specs: SequenceSpec[], wait_s: number, detail: ResultDetail, call_stop: CallStopWhen | undefined, until: string | undefined, stop_together: boolean): Promise<Record<string, unknown>>
     {
         if (until !== undefined)
         {
