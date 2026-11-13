@@ -47,9 +47,9 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
     - name: Install Python packages
-      # The same packages as the Dockerfile and the image it is built on
+      # The same packages as the Dockerfile and the image it is built on. Core's test services import pytest
       run: >-
-        python -m pip install "robotraconteur==${RR_CORE_VERSION#v}" numpy
+        python -m pip install "robotraconteur==${RR_CORE_VERSION#v}" numpy pytest
         "robotraconteur-abstract-robot==0.2.3" "robotraconteurcompanion==0.4.0"
         "general-robotics-toolbox==0.7.3" "reynard-the-robot==0.3.1" scipy pyyaml
     - name: Install Node.js packages
