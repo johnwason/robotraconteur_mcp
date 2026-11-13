@@ -800,6 +800,51 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_start_sequence", { service, steps: [{ action: "stop_when", name: "ev2", condition: {} }, { action: "end_stop_when", name: "ev2" }] }, /The end_stop_when action does not use name/);
     });
 
+    test("on_stop runs at once when a sequence stops, step by step even past a failure", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            steps: [{ action: "stop_when", service, name: "ev2", condition: {} }, { action: "wait", seconds: 20 }],
+            on_stop: [
+                { action: "call_function", name: "teleport", arguments: ["NaN", 0] },
+                { action: "set_property", name: "color", value: [0, 0, 1] },
+                { action: "get_property", name: "color", label: "check" },
+                { action: "call_function", name: "say", arguments: ["Show stopped"] }
+            ]
+        });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [1, 0] });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "stopped", JSON.stringify(status));
+        assert.deepEqual(status.on_stop.map((r: any) => r.step), [0, 1, 2, 3]);
+        assert.match(status.on_stop[0].error, /finite/);
+        assert.equal(status.on_stop[1].error, undefined, "the rest ran after the failure");
+        assert.deepEqual(status.on_stop[2].result, [0, 0, 1]);
+        assert.ok(status.on_stop[0].started_s - status.stopped_by.at_s < 0.2, `on_stop ran at once: ${status.on_stop[0].started_s} after ${status.stopped_by.at_s}`);
+        await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.929, 0.49, 0.192] });
+    });
+
+    test("on_stop runs on cancel but not on completion, and cannot wait", async () =>
+    {
+        const on_stop = [{ action: "get_property", name: "color" }];
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 20 }], on_stop });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        assert.equal(cancelled.state, "cancelled");
+        assert.equal(cancelled.on_stop.length, 1, "cancel returns after on_stop has run");
+        assert.ok(Array.isArray(cancelled.on_stop[0].result));
+
+        const completed = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", wait_s: 5, steps: [{ action: "wait", seconds: 0.1 }], on_stop });
+        assert.equal(completed.state, "completed");
+        assert.equal(completed.on_stop, undefined);
+
+        const steps = [{ action: "wait", seconds: 1 }];
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps, on_stop: [{ action: "wait", seconds: 1 }] }, /on_stop\[0\] \(wait\): on_stop runs at once, so it cannot use wait/);
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps, on_stop: [{ action: "get_property", name: "color", at_s: 1 }] }, /cannot use at_s/);
+        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps, on_stop: [{ action: "get_property", name: "nothing" }] }, /on_stop\[0\] \(get_property nothing\): .*no property named "nothing".*was not started/);
+    });
+
     test("stop_when halts a robot that passes a limit", async () =>
     {
         const service = "robot_b.robot";

@@ -112,6 +112,13 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "repeat", "continue_on_error"];
 
+/** Actions on_stop cannot use, since they wait, and fields it cannot use, since they schedule */
+const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints"];
+const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "repeat", "continue_on_error"];
+/** The most steps on_stop can have, and how long they can take together */
+const MAX_ON_STOP = 20;
+const ON_STOP_LIMIT_S = 10;
+
 /** Limits that keep a mistake in a sequence from running away */
 export const SEQUENCE_LIMITS = {
     maxSteps: 200,
@@ -258,7 +265,10 @@ class Sequence
     ended?: Date;
     done!: Promise<void>;
 
-    constructor(readonly id: string, readonly steps: SequenceStep[], readonly max_duration_s: number) {}
+    /** The results of the on_stop steps, if they ran */
+    on_stop_results?: StepResult[];
+
+    constructor(readonly id: string, readonly steps: SequenceStep[], readonly max_duration_s: number, readonly on_stop: SequenceStep[] = []) {}
 
     get elapsed(): number
     {
@@ -279,9 +289,27 @@ export class SequenceRunner
      * by the steps that do not name one. With wait_s, waits up to that long for the sequence to finish
      * and reports it as status does
      */
-    async start(given_steps: SequenceStep[], max_duration_s = SEQUENCE_LIMITS.defaultDuration, service?: string, wait_s = 0, detail: ResultDetail = "compact"): Promise<Record<string, unknown>>
+    async start(given_steps: SequenceStep[], max_duration_s = SEQUENCE_LIMITS.defaultDuration, service?: string, wait_s = 0, detail: ResultDetail = "compact", given_on_stop: SequenceStep[] = []): Promise<Record<string, unknown>>
     {
-        const steps = given_steps.map((s) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s);
+        const with_service = (s: SequenceStep) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s;
+        const steps = given_steps.map(with_service);
+        const on_stop = given_on_stop.map(with_service);
+        if (on_stop.length > MAX_ON_STOP) throw new Error(`on_stop can have at most ${MAX_ON_STOP} steps`);
+        for (const [i, step] of on_stop.entries())
+        {
+            const where = `on_stop[${i}] (${[step.action, step.label ?? step.name].filter((x) => x).join(" ")})`;
+            if (ON_STOP_REFUSED_ACTIONS.includes(step.action)) throw new Error(`${where}: on_stop runs at once, so it cannot use ${step.action}. It can use ${SEQUENCE_ACTIONS.filter((a) => !ON_STOP_REFUSED_ACTIONS.includes(a)).join(", ")}. The sequence was not started.`);
+            const timing = ON_STOP_REFUSED_FIELDS.filter((f) => step[f] !== undefined);
+            if (timing.length > 0) throw new Error(`${where}: on_stop steps run at once and in order, each even if another fails, so they cannot use ${timing.join(", ")}. The sequence was not started.`);
+            try
+            {
+                await this.check(step, SEQUENCE_LIMITS.maxDuration);
+            }
+            catch (e)
+            {
+                throw new Error(`${where}: ${errorText(e)} The sequence was not started.`);
+            }
+        }
         const running = [...this.sequences.values()].filter((s) => s.state === "running").length;
         if (running >= SEQUENCE_LIMITS.maxRunning) throw new Error(`${running} sequences are already running. Wait for one to finish, or cancel one with robotraconteur_cancel_sequence.`);
         if (steps.length === 0) throw new Error("A sequence needs at least one step");
@@ -315,7 +343,7 @@ export class SequenceRunner
         }
         if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed`);
 
-        const sequence = new Sequence(`seq-${this.next_id++}`, steps, max_duration_s);
+        const sequence = new Sequence(`seq-${this.next_id++}`, steps, max_duration_s, on_stop);
         sequence.total_runs = runs;
         this.sequences.set(sequence.id, sequence);
         this.forgetOld();
@@ -796,6 +824,42 @@ export class SequenceRunner
             sequence.finished_s = sequence.elapsed;
             sequence.ended = new Date();
         }
+        if (sequence.state !== "completed" && sequence.on_stop.length > 0) await this.runOnStop(sequence);
+    }
+
+    /**
+     * Run the on_stop steps of a sequence that ended without completing: at once, in order, each
+     * even if another fails, within ON_STOP_LIMIT_S seconds in all
+     */
+    private async runOnStop(sequence: Sequence): Promise<void>
+    {
+        const controller = new AbortController();
+        const limit = setTimeout(() => controller.abort(new Error(`on_stop ran longer than ${ON_STOP_LIMIT_S} seconds, so its remaining steps were not run`)), ON_STOP_LIMIT_S * 1000);
+        sequence.on_stop_results = [];
+        try
+        {
+            for (const [i, step] of sequence.on_stop.entries())
+            {
+                const started = sequence.elapsed;
+                const entry: StepResult = { step: i, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
+                try
+                {
+                    if (controller.signal.aborted) throw controller.signal.reason;
+                    const result = await untilAborted(this.act(step, controller.signal), controller.signal);
+                    if (result !== null && result !== undefined) entry.result = result;
+                }
+                catch (e)
+                {
+                    entry.error = errorText(e);
+                }
+                entry.duration_s = round(sequence.elapsed - started);
+                sequence.on_stop_results.push(entry);
+            }
+        }
+        finally
+        {
+            clearTimeout(limit);
+        }
     }
 
     private report(sequence: Sequence, from_index: number, detail: ResultDetail = "compact"): Record<string, unknown>
@@ -847,6 +911,7 @@ export class SequenceRunner
         if (sequence.state !== "running" && sequence.total_runs > sequence.results.length) report.not_run = sequence.total_runs - sequence.results.length;
         if (sequence.error) report.error = sequence.error;
         report.results = results;
+        if (sequence.on_stop_results) report.on_stop = sequence.on_stop_results;
         if (omitted > 0) report.omitted = omitted;
         report.next_index = i;
         report.more_results = i < sequence.results.length;
