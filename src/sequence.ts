@@ -59,6 +59,7 @@ export interface SequenceStep
     duration_s?: number;
     seconds?: number;
     condition?: Record<string, unknown>;
+    new_events_only?: boolean;
     watch?: WatchEntry[];
     combine?: Record<string, unknown>;
     check_every_s?: number;
@@ -84,7 +85,7 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     read_events: ["service", "name", "clear", "limit"],
     robot_move_joints: ["service", "object", "joint_position", "duration_s"],
     wait: ["seconds"],
-    wait_until: ["service", "object", "name", "condition", "watch", "combine", "timeout_s", "check_every_s"]
+    wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"]
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "repeat", "continue_on_error"];
 
@@ -216,7 +217,11 @@ class Sequence
 {
     state: SequenceState = "running";
     error?: string;
-    current?: { step: number; iteration?: number };
+    /** The step running, or waiting for its time when waiting is true */
+    current?: { step: number; iteration?: number; waiting: boolean; starts_at_s: number };
+    /** Where the sequence was when it stopped, if it did not complete */
+    stopped_at?: { step: number; iteration?: number; waiting: boolean };
+    total_runs = 0;
     readonly results: StepResult[] = [];
     readonly controller = new AbortController();
     readonly started = new Date();
@@ -271,6 +276,7 @@ export class SequenceRunner
         if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed`);
 
         const sequence = new Sequence(`seq-${this.next_id++}`, steps, max_duration_s);
+        sequence.total_runs = runs;
         this.sequences.set(sequence.id, sequence);
         this.forgetOld();
         const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${max_duration_s} seconds`)), max_duration_s * 1000);
@@ -282,8 +288,7 @@ export class SequenceRunner
             started: sequence.started.toISOString(),
             now: new Date().toISOString(),
             steps: steps.length,
-            max_duration_s,
-            note: "The sequence is running. Use robotraconteur_sequence_status to follow it, with wait_s to wait for it to finish, and robotraconteur_cancel_sequence to stop it."
+            max_duration_s
         };
     }
 
@@ -310,8 +315,7 @@ export class SequenceRunner
             sequence.controller.abort(new SequenceStopped("cancelled", "The sequence was cancelled"));
             await sequence.done;
         }
-        // The last result shows the step that was stopped
-        return this.report(sequence, Math.max(0, sequence.results.length - 1));
+        return this.report(sequence, 0);
     }
 
     /** The sequences known, newest first, up to limit */
@@ -519,6 +523,7 @@ export class SequenceRunner
         const watches = this.watches(step).map((w) => ({ ...w, test: compileCondition(w.condition) }));
         const kinds = await Promise.all(watches.map((w) => this.tools.watchedKind(w.service, w.object, w.name)));
         const combine = step.combine ? compileCondition(step.combine) : undefined;
+        const since = step.new_events_only ? Date.now() : undefined;
         const started = performance.now();
         const deadline = started + step.timeout_s! * 1000;
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
@@ -529,7 +534,7 @@ export class SequenceRunner
             {
                 if (kinds[i] === "event")
                 {
-                    const event = this.tools.findEvent(w.service, w.name, w.test);
+                    const event = this.tools.findEvent(w.service, w.name, w.test, since);
                     return { matched: event !== undefined, event };
                 }
                 const value = await this.tools.readValue(w.service, w.object, w.name);
@@ -600,11 +605,13 @@ export class SequenceRunner
                 {
                     const scheduled = base + k * (step.repeat?.every_s ?? 0);
                     // A step that is already due starts now, rather than after a timer
+                    const iteration = step.repeat ? k : undefined;
+                    sequence.current = { step: i, iteration, waiting: true, starts_at_s: round(scheduled) };
                     const delay = scheduled - sequence.elapsed;
                     if (delay > 0) await sleep(delay * 1000, signal);
                     else if (signal.aborted) throw signal.reason;
                     const started = sequence.elapsed;
-                    sequence.current = { step: i, iteration: step.repeat ? k : undefined };
+                    sequence.current = { step: i, iteration, waiting: false, starts_at_s: round(scheduled) };
                     const entry: StepResult = { step: i, iteration: step.repeat ? k : undefined, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
                     if (started - scheduled > LATE_REPORTED_S) entry.late_s = round(started - scheduled);
                     try
@@ -647,6 +654,7 @@ export class SequenceRunner
         }
         finally
         {
+            if (sequence.state !== "completed" && sequence.current) sequence.stopped_at = { step: sequence.current.step, iteration: sequence.current.iteration, waiting: sequence.current.waiting };
             sequence.current = undefined;
             sequence.finished_s = sequence.elapsed;
             sequence.ended = new Date();
@@ -684,7 +692,20 @@ export class SequenceRunner
             max_duration_s: sequence.max_duration_s,
             steps: sequence.steps.length
         };
-        if (current) report.current_step = { step: current.step, iteration: current.iteration, action: sequence.steps[current.step]!.action, label: sequence.steps[current.step]!.label };
+        if (current)
+        {
+            const s = sequence.steps[current.step]!;
+            report.current_step = { step: current.step, iteration: current.iteration, action: s.action, label: s.label, waiting: current.waiting || undefined, starts_at_s: current.starts_at_s };
+        }
+        const at = sequence.stopped_at;
+        // A failed sequence says what happened in error
+        if (at && (sequence.state === "cancelled" || sequence.state === "timed_out"))
+        {
+            const s = sequence.steps[at.step]!;
+            const which = `step ${at.step}${at.iteration !== undefined ? ` run ${at.iteration}` : ""} (${s.label ?? s.action})`;
+            report.stopped = at.waiting ? `Between steps: nothing was running. ${which} was waiting for its time and did not start` : `During ${which}, which was stopped`;
+        }
+        if (sequence.state !== "running" && sequence.total_runs > sequence.results.length) report.not_run = sequence.total_runs - sequence.results.length;
         if (sequence.error) report.error = sequence.error;
         report.results = results;
         if (omitted > 0) report.omitted = omitted;

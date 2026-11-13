@@ -283,11 +283,12 @@ export class ServiceRegistry
 
     /**
      * The oldest event received with this name whose arguments pass the test, if there is one, left in
-     * place. Events received before the call count, so one that arrived just before is not missed
+     * place. Events received before the call count, so one that arrived just before is not missed,
+     * unless since, a time in milliseconds, leaves out those received before it
      */
-    findEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean): ReceivedEvent | undefined
+    findEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
     {
-        return this.connect(name).events.find((e) => e.event === event && test(e.arguments));
+        return this.connect(name).events.find((e) => e.event === event && (since === undefined || Date.parse(e.time) >= since) && test(e.arguments));
     }
 
     /** Remove an event found with findEvent, so that read_events does not return it again */

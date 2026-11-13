@@ -616,6 +616,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
         assert.equal(cancelled.state, "cancelled");
         assert.match(cancelled.results[0].error, /cancelled/);
+        assert.match(cancelled.stopped, /^During step 0 \(robot_move_joints\), which was stopped/);
+        assert.equal(cancelled.not_run, 1);
         assert.equal((await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" })).value.name, "halt");
 
         // It stopped partway, and stays where it stopped. The driver acts on the halt in its next
@@ -676,6 +678,22 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual((await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position, stopped);
 
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+    });
+
+    test("a cancel between steps says so, and the status shows the step being waited for", async () =>
+    {
+        const say = (n: number) => ({ action: "call_function", name: "say", arguments: [`Count ${n}`], at_s: 2 * n, label: `say ${n}` });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [say(0), say(1), say(2)] });
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        const waiting = await ok(bridge, "robotraconteur_sequence_status", { sequence_id });
+        assert.deepEqual({ step: waiting.current_step.step, waiting: waiting.current_step.waiting, starts_at_s: waiting.current_step.starts_at_s }, { step: 1, waiting: true, starts_at_s: 2 });
+
+        const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
+        assert.equal(cancelled.state, "cancelled");
+        assert.match(cancelled.stopped, /^Between steps: nothing was running\. step 1 \(say 1\) was waiting for its time and did not start/);
+        assert.equal(cancelled.not_run, 2);
+        // All the results so far, not only the last
+        assert.deepEqual(cancelled.results.map((r: any) => r.label), ["say 0"]);
     });
 
     test("a sequence that runs past max_duration_s is stopped", async () =>
@@ -775,14 +793,17 @@ describe("timed sequences", { timeout: 300000 }, () =>
         }
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
             steps: [
+                { action: "wait_until", service, name: "ev1", condition: {}, timeout_s: 0.3, new_events_only: true, continue_on_error: true },
                 { action: "wait_until", service, name: "ev1", condition: {}, timeout_s: 2 },
                 { action: "wait_until", service, name: "ev1", condition: {}, timeout_s: 0.3 }
             ]
         });
         const status = await finish(sequence_id);
         assert.equal(status.state, "failed");
-        assert.ok(status.results[0].result.waited_s < 0.2, `the earlier event was found at once: ${status.results[0].result.waited_s}`);
-        assert.match(status.results[1].error, /No ev1 event matching the condition arrived within 0\.3 seconds/);
+        assert.match(status.results[0].error, /No ev1 event matching the condition arrived within 0\.3 seconds/, "new_events_only ignores the earlier event");
+        assert.ok(status.results[1].result.waited_s < 0.2, `the earlier event was found at once: ${status.results[1].result.waited_s}`);
+        assert.match(status.results[2].error, /No ev1 event matching the condition arrived within 0\.3 seconds/);
+        assert.equal(status.stopped, undefined, "a failed sequence explains itself in error");
     });
 
     test("read_events filters by name, returns the oldest first, and keeps the rest", async () =>

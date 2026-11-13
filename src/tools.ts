@@ -282,9 +282,9 @@ export class BridgeTools
     }
 
     /** The oldest event of this name received from a service whose arguments pass the test, left in place */
-    findEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean): ReceivedEvent | undefined
+    findEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
     {
-        return this.registry.findEvent(service, event, test);
+        return this.registry.findEvent(service, event, test, since);
     }
 
     /** Remove an event found with findEvent */
