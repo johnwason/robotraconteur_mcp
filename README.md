@@ -105,7 +105,7 @@ A `stop_when` step takes a condition the same way as `wait_until` (`name` and `c
 
 `on_stop`, next to `steps`, lists steps to run at once if the sequence ends without completing: stopped by `stop_when`, cancelled, timed out, or failed. It is for cleaning up, such as stopping a motion that a function started without waiting, or saying that the show stopped. The steps run in order, each even if another fails, within 10 seconds in all. They cannot wait: `wait`, `wait_until`, `stop_when`, `end_stop_when`, and `robot_move_joints` are refused, and so are `at_s`, `after`, and `repeat`. They are checked with the other steps before the sequence starts, and their results are given in `on_stop`. A cancel returns once they have run.
 
-`only_if` on any step, including `on_stop` steps, runs it only if a MongoDB query holds when its turn comes, and otherwise skips it, with `skipped: true` in its result. The query is on the outcomes of earlier labelled steps, by label, each `{ ok, skipped, result, error }`:
+`only_if` on any step, including `on_stop` steps, runs it only if a MongoDB query holds, and otherwise skips it completely, with `skipped: true` in its result. It is decided as soon as the step comes up, so a skipped step does not wait for its `at_s` or `after` time, none of its repeats run, and it does not hold up the steps after it. The query is on the outcomes of earlier labelled steps, by label, each `{ ok, skipped, result, error }`:
 
 ```json
 { "action": "wait_until", "name": "new_message", "condition": {}, "timeout_s": 10, "label": "answer", "continue_on_error": true },

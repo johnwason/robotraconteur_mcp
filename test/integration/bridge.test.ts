@@ -875,6 +875,29 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(Array.isArray(by(answered).big.result));
     });
 
+    test("a skipped step does not wait for its time or run its repeats", async () =>
+    {
+        const status = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            detail: "full",
+            steps: [
+                { action: "wait_until", service: TEST_SERVICE, name: "ev2", condition: { d1: { $gt: 1000 } }, timeout_s: 0.3, label: "answer", continue_on_error: true },
+                // The celebration, timed from the answer, is skipped when there is none
+                { action: "get_property", name: "color", after: "answer", at_s: 1, label: "celebrate", only_if: { "answer.ok": true } },
+                { action: "get_property", name: "color", label: "many", only_if: { "answer.ok": true }, repeat: { count: 5, every_s: 1 } },
+                { action: "get_property", name: "color", label: "too_slow", only_if: { "answer.ok": false } }
+            ]
+        });
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        const by = Object.fromEntries(status.results.map((r: any) => [r.label, r]));
+        assert.equal(by.celebrate.skipped, true);
+        assert.equal(status.results.filter((r: any) => r.label === "many").length, 1, "one result for a skipped step with repeats");
+        const answer_end = by.answer.started_s + by.answer.duration_s;
+        assert.ok(by.too_slow.started_s - answer_end < 0.1, `too_slow ran at once, not after the skipped step's time: ${by.too_slow.started_s} after ${answer_end}`);
+        assert.equal(status.not_run, undefined);
+    });
+
     test("only_if works in on_stop, and is checked before starting", async () =>
     {
         const status = await ok(bridge, "robotraconteur_start_sequence", {

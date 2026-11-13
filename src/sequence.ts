@@ -330,6 +330,8 @@ class Sequence
     /** The stop_when steps started, by step index, and whether each is still watching */
     readonly monitors = new Map<number, { label?: string; active: boolean; watch: PreparedWatch }>();
     total_runs = 0;
+    /** Repeats of skipped steps, which have one result for all their runs */
+    skipped_runs = 0;
     readonly results: StepResult[] = [];
     readonly controller = new AbortController();
     readonly started = new Date();
@@ -845,6 +847,16 @@ export class SequenceRunner
         {
             for (const [i, step] of sequence.steps.entries())
             {
+                // only_if is decided as soon as the step comes up, since the earlier steps it queries have
+                // all finished. A skipped step is skipped completely, with no wait for its time and none
+                // of its repeats, so it does not hold up the steps after it
+                if (step.only_if !== undefined && !onlyIf(sequence, step.only_if))
+                {
+                    record(sequence, step, { step: i, action: step.action, label: step.label, started_s: round(sequence.elapsed), duration_s: 0, skipped: true });
+                    sequence.skipped_runs += (step.repeat?.count ?? 1) - 1;
+                    if (step.label !== undefined) label_end.set(step.label, sequence.elapsed);
+                    continue;
+                }
                 // at_s counts from the start of the sequence, or with after, from when that step ended
                 const base = step.after !== undefined ? label_end.get(step.after)! + (step.at_s ?? 0) : step.at_s ?? previous_end;
                 const count = step.repeat?.count ?? 1;
@@ -861,12 +873,6 @@ export class SequenceRunner
                     sequence.current = { step: i, iteration, waiting: false, starts_at_s: round(scheduled) };
                     const entry: StepResult = { step: i, iteration: step.repeat ? k : undefined, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
                     if (started - scheduled > LATE_REPORTED_S) entry.late_s = round(started - scheduled);
-                    if (step.only_if !== undefined && !onlyIf(sequence, step.only_if))
-                    {
-                        entry.skipped = true;
-                        record(sequence, step, entry);
-                        continue;
-                    }
                     try
                     {
                         // A robot motion, a generator, or a wait stops itself when aborted, halting a robot
@@ -1005,7 +1011,8 @@ export class SequenceRunner
             report.stopped = sequence.state === "stopped" && sequence.stop_message && sequence.stopped_by?.error === undefined ? `${sequence.stop_message}. ${where}` : where;
         }
         if (sequence.stopped_by) report.stopped_by = sequence.stopped_by;
-        if (sequence.state !== "running" && sequence.total_runs > sequence.results.length) report.not_run = sequence.total_runs - sequence.results.length;
+        const not_run = sequence.total_runs - sequence.skipped_runs - sequence.results.length;
+        if (sequence.state !== "running" && not_run > 0) report.not_run = not_run;
         if (sequence.error) report.error = sequence.error;
         report.results = results;
         if (sequence.on_stop_results) report.on_stop = sequence.on_stop_results;
