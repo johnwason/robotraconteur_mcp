@@ -684,7 +684,13 @@ export class SequenceRunner
                 if (sequence.state !== "running" || signal.aborted || !monitor.active) return;
                 if (result.met)
                 {
-                    sequence.stopped_by = { step: index, label: step.label, ...this.takeMatched(p, result.outcomes, round((performance.now() - started) / 1000)) };
+                    const matched = this.takeMatched(p, result.outcomes, round((performance.now() - started) / 1000));
+                    // When it fired in sequence time and, for an event, how long after the event arrived
+                    const stopped_ms = Date.now();
+                    const events = result.outcomes.map((o) => o.event).filter((e) => e !== undefined);
+                    const timing: Record<string, number> = { at_s: round(sequence.elapsed) };
+                    if (events.length > 0) timing.event_to_stop_s = round((stopped_ms - Math.min(...events.map((e) => Date.parse(e!.time)))) / 1000);
+                    sequence.stopped_by = { step: index, label: step.label, ...timing, ...matched };
                     sequence.controller.abort(new SequenceStopped("stopped", `The sequence was stopped by ${which}, whose condition was met`));
                     return;
                 }

@@ -748,6 +748,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(status.stopped_by.step, 0);
         assert.equal(status.stopped_by.label, "guard");
         assert.equal(status.stopped_by.event.arguments.d1, 9);
+        assert.ok(status.stopped_by.at_s > 0.5 && status.stopped_by.at_s < 5, String(status.stopped_by.at_s));
+        assert.ok(status.stopped_by.event_to_stop_s >= 0 && status.stopped_by.event_to_stop_s < 0.2, `stopped soon after the event: ${status.stopped_by.event_to_stop_s}`);
         assert.match(status.stopped, /^The sequence was stopped by stop_when steps\[0\] \(guard\), whose condition was met\. During step 1 \(long\), which was stopped/);
         assert.equal(status.not_run, 1);
         assert.equal(status.error, undefined);
