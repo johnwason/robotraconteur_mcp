@@ -28,7 +28,7 @@ const HELP: Record<HelpTopic, string> = {
 - robot_move_joints (joint_position, duration_s at most 100). It lasts until the robot arrives, so to act during a motion, start a second sequence.
 - wait (seconds). noop does nothing, such as to anchor timing with at.
 - wait_until (name and condition, or watch; timeout_s), stop_when (name and condition, or watch), end_stop_when (target): see waiting and stopping.
-Arguments are fixed when the sequence starts: a step cannot use an earlier step's result, such as putting a received message into a say. To act on a result, branch on it with only_if, or read it in the step's result and start a new sequence.
+Arguments are fixed when the sequence starts: a step cannot use an earlier step's result, such as passing a value one step read as another step's argument. To act on a result, branch on it with only_if, or read it in the step's result and start a new sequence.
 Fields for any action: label, at_s, after, at, max_late, max_late_s, only_if, repeat { count, every_s } to run the step several times at a fixed interval, such as to sample a wire, and continue_on_error to go on if the step fails.
 Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns} runs counting repeats per sequence, ${SEQUENCE_LIMITS.maxRunning} sequences running at once, max_duration_s at most ${SEQUENCE_LIMITS.maxDuration} (default ${SEQUENCE_LIMITS.defaultDuration}).`,
 
@@ -41,7 +41,7 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - Sequences started in one call start together on one clock, so at_s 1 means one second from now in each of them. Steps with the same at_s in one sequence start a few milliseconds apart, since they run one after another; for things that must start at the same instant, put them in different sequences of one call, whose steps with the same at_s start within a millisecond or two.
 - Within one call, time steps with at_s. Use at only to meet sequences started in other calls, or an outside time. To anchor a sequence at an absolute time and time the rest relative to it, start with a noop step with at and a label, and give later steps after that label with at_s.`,
 
-    waiting: `A wait_until step waits until a wire, property, or event meets a condition (see conditions), such as name new_message with condition {} for any chat message. If timeout_s passes first, the step fails, and so does the sequence unless the step has continue_on_error. For an event, its result gives the event and event_to_match_s, from the event arriving to the match.
+    waiting: `A wait_until step waits until a wire, property, or event meets a condition (see conditions), such as a status wire reaching a value, a property changing, or an event, where condition {} matches any event of that name. If timeout_s passes first, the step fails, and so does the sequence unless the step has continue_on_error. For an event, its result gives the event and event_to_match_s, from the event arriving to the match.
 - watch: several things to watch, each { key, service, object, name, condition }, in place of name and condition, up to 10. Wires, properties, and events on any services can be mixed. key defaults to name, and keys must differ. The step ends when any entry is met, unless combine says otherwise. The result's met lists the keys of the entries that were met, and its watch gives each entry by key: whether it was met, the value of a wire or property, and the event of an event that was met.
 - combine: with watch, a MongoDB query over the entries by key, each true or false, saying when the step ends, such as { "msg": true, "arm_ok": true } for both, or { "$or": [{ "msg": true }, { "fault": true }] }. An event entry, once met, stays met until the step ends, because the event waits unread. Only the events of entries that are met when the step ends are removed from read_events.
 - check_every_s: how often to read the wires and properties watched. The default is 0.05. Events are checked as soon as they arrive.
@@ -60,6 +60,7 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - An end_stop_when step ends a stop_when early, so that it only covers the steps between the two: target is the label of the stop_when to end, or leave it out to end them all.
 - A stop_when step only watches while its own sequence runs, and on_stop only runs for its own sequence. To stop all the sequences of a call together, give the call a stop_when, next to sequences, rather than one in each sequence, which would only stop the first to take the event. The call's stop_when watches from the moment the call starts the sequences until all have ended, stops every sequence still running, and holds back the events it matches from the wait_until steps of all the sequences.
 - stop_together: true on the call stops every other sequence still running at once when any one ends without completing (failed, timed out, stopped, or cancelled), before the ended one's on_stop runs. Each stopped one runs its own on_stop and has stopped_by with stop_together true and the sequence_id, label, state, and sequence_error of the one that ended. Use it when the sequences only make sense together, such as robots that move as one.
+- Anything that must interrupt a running sequence, such as an operator request, a fault, or a sensor limit, needs a stop_when in that sequence or the call's stop_when, with on_stop to make the device safe; checked only between sequences, it waits until the running step ends. Watch for it from the start of the sequence, so it covers every step that moves or acts.
 - A sequence also stops at the first failed step unless that step has continue_on_error, and after max_duration_s, with state timed_out.
 - robotraconteur_cancel_sequence stops sequences at once, aborting a running generator and halting a robot moved by robot_move_joints. A function call that is still running, such as a motion called with wait true, stops being waited for, but the service finishes it. Work a service started from a call that returned at once, such as a motion started without waiting, is not stopped: stop it with the service's own command, such as in on_stop. A cancel from the model arrives a turn after the last result, often seconds later, so a stop at a set time or on something happening belongs in max_duration_s or stop_when.`,
 
@@ -95,6 +96,18 @@ Ask a question, wait up to 20 s for an answer, and act on it, returning as soon 
     { "action": "wait_until", "name": "new_message", "condition": {}, "new_events_only": true, "timeout_s": 20, "label": "answer", "continue_on_error": true },
     { "action": "call_function", "name": "wave", "only_if": { "answer.result.event.arguments.message": "yes" } },
     { "action": "call_function", "name": "say", "arguments": ["No answer"], "only_if": { "answer.ok": false } } ] }] }
+
+An industrial robot motion that stops at once on a protective or emergency stop, or an operator stop button, making the robot safe. The same pattern serves any device, such as stopping a camera capture when a trigger event or a limit arrives:
+{ "sequences": [{ "service": "cell.robot", "steps": [
+    { "action": "stop_when", "label": "stop", "watch": [
+        { "key": "fault", "name": "robot_state", "condition": { "controller_state.name": { "$in": ["guard_stop", "emergency_stop"] } } },
+        { "key": "operator", "service": "cell.panel", "name": "stop_pressed", "condition": {} } ] },
+    { "action": "robot_move_joints", "joint_position": [0.5, 0, 0, 0, 0.3, 0], "duration_s": 4 },
+    { "action": "call_function", "name": "start_process", "arguments": [] },
+    { "action": "wait", "seconds": 10 } ],
+  "on_stop": [
+    { "action": "call_function", "name": "stop_process", "arguments": [] },
+    { "action": "set_property", "name": "command_mode", "value": "halt" } ] }] }
 
 Stop a whole show on one message, cleaning up each robot:
 { "stop_when": { "service": "robot1", "name": "new_message", "condition": { "message": "stop" } },
