@@ -505,6 +505,11 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const status = await finish(started.sequence_id);
         assert.equal(status.state, "completed", JSON.stringify(status));
         assert.equal(status.started, started.started);
+        assert.ok(Date.parse(status.ended) >= Date.parse(status.started) + 1500, `ended after the steps: ${status.ended}`);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const later = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: started.sequence_id });
+        assert.equal(later.elapsed_s, status.elapsed_s, "elapsed_s stops when the sequence ends");
+        assert.equal(later.ended, status.ended);
         assert.ok(Date.parse(status.now) - Date.parse(status.started) >= 1500, `now is after the sequence ran: ${status.now}`);
         assert.equal(status.results.length, 10);
         assert.equal(status.more_results, false);
@@ -864,7 +869,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await ok(bridge, "robotraconteur_call_function", { service: TEST_SERVICE, name: "func2", arguments: [9, 0] });
         const status = await finish(sequence_id);
         assert.equal(status.state, "completed", JSON.stringify(status));
-        const { watch } = status.results[0].result;
+        const { watch, met } = status.results[0].result;
+        assert.deepEqual(met, ["big"]);
         assert.equal(watch.big.matched, true);
         assert.equal(watch.big.event.arguments.d1, 9);
         assert.deepEqual(watch.ping, { matched: false });
@@ -897,6 +903,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const status = await finish(sequence_id);
         assert.equal(status.state, "completed", JSON.stringify(status));
         assert.equal(status.results[0].result.watch.msg.event.arguments.d1, 5);
+        assert.deepEqual(status.results[0].result.met, ["msg", "green"]);
         assert.equal(status.results[0].result.watch.green.matched, true);
         assert.equal((await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" })).events.length, 0, "the event was taken");
         await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.929, 0.49, 0.192] });

@@ -222,6 +222,7 @@ class Sequence
     readonly started = new Date();
     readonly t0 = performance.now();
     finished_s?: number;
+    ended?: Date;
     done!: Promise<void>;
 
     constructor(readonly id: string, readonly steps: SequenceStep[], readonly max_duration_s: number) {}
@@ -550,6 +551,7 @@ export class SequenceRunner
                 return {
                     matched: true,
                     waited_s,
+                    met: watches.filter((_, i) => outcomes[i]!.matched).map((w) => w.key),
                     watch: Object.fromEntries(watches.map((w, i) =>
                     {
                         const o = outcomes[i]!;
@@ -647,6 +649,7 @@ export class SequenceRunner
         {
             sequence.current = undefined;
             sequence.finished_s = sequence.elapsed;
+            sequence.ended = new Date();
         }
     }
 
@@ -675,6 +678,7 @@ export class SequenceRunner
             sequence_id: sequence.id,
             state: sequence.state,
             started: sequence.started.toISOString(),
+            ended: sequence.ended?.toISOString(),
             now: new Date().toISOString(),
             elapsed_s: round(sequence.finished_s ?? sequence.elapsed),
             max_duration_s: sequence.max_duration_s,
