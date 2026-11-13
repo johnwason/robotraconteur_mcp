@@ -51,24 +51,28 @@ Services are named by `robotraconteur_discover` as `node.service`, and a name st
 
 ### Timed sequences
 
-Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of steps and returns a `sequence_id` straight away:
+Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of `sequences`, usually one, each with its steps, and returns their `sequence_id` values straight away:
 
 ```json
 {
-    "steps": [
-        { "action": "call_function", "service": "reynard", "name": "say", "arguments": ["Watch this"] },
-        { "action": "wait", "seconds": 2 },
-        { "action": "robot_move_joints", "service": "left_arm.robot", "joint_position": [0.3, 0, 0, 0, 0, 0], "duration_s": 2 },
-        { "action": "read_wire", "service": "left_arm.robot", "name": "robot_state", "repeat": { "count": 10, "every_s": 0.1 } },
-        { "action": "set_property", "service": "reynard", "name": "color", "value": [0, 1, 0], "at_s": 8 }
-    ],
-    "max_duration_s": 30
+    "sequences": [{
+        "steps": [
+            { "action": "call_function", "service": "reynard", "name": "say", "arguments": ["Watch this"] },
+            { "action": "wait", "seconds": 2 },
+            { "action": "robot_move_joints", "service": "left_arm.robot", "joint_position": [0.3, 0, 0, 0, 0, 0], "duration_s": 2 },
+            { "action": "read_wire", "service": "left_arm.robot", "name": "robot_state", "repeat": { "count": 10, "every_s": 0.1 } },
+            { "action": "set_property", "service": "reynard", "name": "color", "value": [0, 1, 0], "at_s": 8 }
+        ],
+        "max_duration_s": 30
+    }]
 }
 ```
 
+Each entry of `sequences` has `steps`, and optionally `label`, `service` for its steps that do not name one, `on_stop`, and `max_duration_s`. `wait_s` and `detail` apply to the whole call, and the result gives each sequence in order. Sequences started in one call start at the same instant on one clock, so their `at_s` and `after` times line up across them, which is how to move several robots together. Every step of every sequence is checked first, and if any is wrong, none start. Once started, each runs on its own: it has its own `sequence_id`, and stopping, cancelling, or failing one does not affect the others.
+
 - Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`, and `wait_until`, described below.
 - Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later, so steps with the same `at_s` run one after another, in order.
-- `at` starts a step at an absolute ISO 8601 time on the server clock, the clock `started`, `now`, and event times use. Steps with the same `at` start together, even in different sequences, which synchronizes robots on separate services. `max_late`, also an absolute time, is the latest the step may start, and defaults to `at`. A step that comes up after it, because earlier steps overran or the sequence started late, fails rather than starting late. A step that comes up in time waits and starts on time, give or take a few milliseconds of timer jitter. `at` cannot be used with `at_s` or `after`, must not be in the past, and must be within `max_duration_s`. `at_s` works the same way: `max_late_s` is the deadline in seconds, counted as `at_s` is, from the start of the sequence or with `after` from that step's end, and it defaults to `at_s`. So a step with `at` or `at_s` starts on time or fails, and a later `max_late` or `max_late_s` lets it start late. A step without either starts when the previous one finishes and has no deadline. To fall back when a timed step fails, give it `continue_on_error` and a later step `only_if: { "<label>.ok": false }`. A step with any deadline always reports `late_s`, even when on time, so synchronization can be read directly.
+- `at` starts a step at an absolute ISO 8601 time on the server clock, the clock `started`, `now`, and event times use. Steps with the same `at` start together, even in different sequences, which synchronizes robots on separate services. `max_late`, also an absolute time, is the latest the step may start, and defaults to `at`. A step that comes up after it, because earlier steps overran or the sequence started late, fails rather than starting late. A step that comes up in time waits and starts on time, give or take a few milliseconds of timer jitter, and up to 20 ms past its latest start still counts as in time, since getting from one step to the next takes a millisecond or two. `at` cannot be used with `at_s` or `after`, must not be in the past, and must be within `max_duration_s`. `at_s` works the same way: `max_late_s` is the deadline in seconds, counted as `at_s` is, from the start of the sequence or with `after` from that step's end, and it defaults to `at_s`. So a step with `at` or `at_s` starts on time or fails, and a later `max_late` or `max_late_s` lets it start late. A step without either starts when the previous one finishes and has no deadline. To fall back when a timed step fails, give it `continue_on_error` and a later step `only_if: { "<label>.ok": false }`. A step with any deadline always reports `late_s`, even when on time, so synchronization can be read directly.
 - A `noop` step does nothing. With `at` and a `label`, it anchors a sequence at an absolute time: later steps use `after` with that label and `at_s`, and `max_late_s` for deadlines, so several sequences can share one start time and keep relative timing. `robotraconteur_sequence_status` without `sequence_id` gives `now`, the server's time, to choose that start time from.
 - `after` names the label of an earlier step, so that `at_s` counts from when that step ended instead of from the start. This keeps timing after a step of unknown length, such as a `wait_until`. Without `at_s`, the step starts as soon as the labelled step has ended. The label must be unique. `repeat` runs a step `count` times, `every_s` apart.
 - A `robot_move_joints` step finishes when the robot arrives. To do something during a motion, such as sampling a wire, start a second sequence; sequences run side by side.
@@ -118,13 +122,13 @@ A `stop_when` step takes a condition the same way as `wait_until` (`name` and `c
 A failed step only lets the sequence go on if it has `continue_on_error`. A query can also look at what a step returned, such as `{ "answer.result.event.arguments.message": "yes" }`. To act on a live value, read it in an earlier labelled step, such as `get_property`. `only_if` does not wait, and the labels it uses are checked before the sequence starts: each must belong to one earlier step.
 
 ```json
-{ "service": "reynard",
+{ "sequences": [{ "service": "reynard",
   "steps": [
     { "action": "stop_when", "name": "new_message", "label": "stop",
       "condition": { "$expr": { "$eq": [{ "$toLower": { "$trim": { "input": "$message" } } }, "stop"] } } },
     { "action": "call_function", "name": "say", "arguments": ["Hooray!"] },
     { "action": "set_property", "name": "color", "value": [0, 1, 0] }
-  ] }
+  ] }] }
 ```
 
 ```json

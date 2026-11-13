@@ -34,6 +34,26 @@ export interface WatchEntry
     condition: Record<string, unknown>;
 }
 
+/** One sequence for start_sequence: its steps, and what applies to them all */
+export interface SequenceSpec
+{
+    label?: string;
+    service?: string;
+    steps: SequenceStep[];
+    on_stop?: SequenceStep[];
+    max_duration_s?: number;
+}
+
+/** A sequence whose steps have all been checked */
+interface PreparedSequence
+{
+    label?: string;
+    steps: SequenceStep[];
+    on_stop: SequenceStep[];
+    max_duration_s: number;
+    runs: number;
+}
+
 /** A wait_until or stop_when step's watch, compiled and ready to check */
 interface PreparedWatch
 {
@@ -359,8 +379,9 @@ class Sequence
     skipped_runs = 0;
     readonly results: StepResult[] = [];
     readonly controller = new AbortController();
-    readonly started = new Date();
-    readonly t0 = performance.now();
+    /** When the sequence started, shared by the sequences started in one call */
+    readonly started: Date;
+    readonly t0: number;
     finished_s?: number;
     ended?: Date;
     done!: Promise<void>;
@@ -370,7 +391,11 @@ class Sequence
     /** The results of the on_stop steps, if they ran */
     on_stop_results?: StepResult[];
 
-    constructor(readonly id: string, readonly steps: SequenceStep[], readonly max_duration_s: number, readonly on_stop: SequenceStep[] = []) {}
+    constructor(readonly id: string, readonly steps: SequenceStep[], readonly max_duration_s: number, readonly on_stop: SequenceStep[], readonly label: string | undefined, clock: { started: Date; t0: number })
+    {
+        this.started = clock.started;
+        this.t0 = clock.t0;
+    }
 
     get elapsed(): number
     {
@@ -391,8 +416,60 @@ export class SequenceRunner
      * by the steps that do not name one. With wait_s, waits up to that long for the sequence to finish
      * and reports it as status does
      */
-    async start(given_steps: SequenceStep[], max_duration_s = SEQUENCE_LIMITS.defaultDuration, service?: string, wait_s = 0, detail: ResultDetail = "compact", given_on_stop: SequenceStep[] = []): Promise<Record<string, unknown>>
+    /**
+     * Check every step of every sequence, then start them all at the same instant, on one clock, so
+     * that their at_s values line up. Nothing starts if any step is wrong. Each sequence's service is
+     * used by its steps that do not name one. With wait_s, waits up to that long for them all to
+     * finish, and reports each as status does
+     */
+    async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact"): Promise<Record<string, unknown>>
     {
+        if (specs.length === 0) throw new Error("Give at least one sequence in sequences.");
+        const running = [...this.sequences.values()].filter((s) => s.state === "running").length;
+        if (running + specs.length > SEQUENCE_LIMITS.maxRunning) throw new Error(`${running} sequences are already running, and at most ${SEQUENCE_LIMITS.maxRunning} can run at once. Wait for one to finish, or cancel one with robotraconteur_cancel_sequence.`);
+        const labels = specs.map((s) => s.label).filter((l) => l !== undefined);
+        const repeated = labels.find((l, i) => labels.indexOf(l) !== i);
+        if (repeated !== undefined) throw new Error(`The label "${repeated}" is used by more than one sequence. Give them different labels.`);
+        const prepared: PreparedSequence[] = [];
+        for (const [i, spec] of specs.entries())
+        {
+            try
+            {
+                prepared.push(await this.prepare(spec));
+            }
+            catch (e)
+            {
+                const which = specs.length > 1 ? `sequences[${i}]${spec.label ? ` (${spec.label})` : ""}: ` : "";
+                throw new Error(`${which}${errorText(e)}${specs.length > 1 ? " None of the sequences were started." : ""}`);
+            }
+        }
+
+        const clock = { started: new Date(), t0: performance.now() };
+        const sequences = prepared.map((p) => this.launch(p, clock));
+        if (wait_s > 0)
+        {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([Promise.all(sequences.map((s) => s.done)), new Promise<void>((resolve) => timer = setTimeout(resolve, Math.min(wait_s, SEQUENCE_LIMITS.maxStatusWait) * 1000))]);
+            clearTimeout(timer);
+            return { sequences: sequences.map((s) => this.report(s, 0, detail)) };
+        }
+        return {
+            sequences: sequences.map((s) => ({
+                sequence_id: s.id,
+                label: s.label,
+                state: s.state,
+                started: s.started.toISOString(),
+                now: new Date().toISOString(),
+                steps: s.steps.length,
+                max_duration_s: s.max_duration_s
+            }))
+        };
+    }
+
+    /** Check one sequence, before anything starts */
+    private async prepare(spec: SequenceSpec): Promise<PreparedSequence>
+    {
+        const { service, steps: given_steps = [], on_stop: given_on_stop = [], max_duration_s = SEQUENCE_LIMITS.defaultDuration } = spec;
         const with_service = (s: SequenceStep) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s;
         const steps = given_steps.map(with_service);
         const on_stop = given_on_stop.map(with_service);
@@ -413,8 +490,6 @@ export class SequenceRunner
                 throw new Error(`${where}: ${errorText(e)} The sequence was not started.`);
             }
         }
-        const running = [...this.sequences.values()].filter((s) => s.state === "running").length;
-        if (running >= SEQUENCE_LIMITS.maxRunning) throw new Error(`${running} sequences are already running. Wait for one to finish, or cancel one with robotraconteur_cancel_sequence.`);
         if (steps.length === 0) throw new Error("A sequence needs at least one step");
         if (steps.length > SEQUENCE_LIMITS.maxSteps) throw new Error(`A sequence can have at most ${SEQUENCE_LIMITS.maxSteps} steps`);
         if (!(max_duration_s > 0) || max_duration_s > SEQUENCE_LIMITS.maxDuration) throw new Error(`max_duration_s must be more than 0 and at most ${SEQUENCE_LIMITS.maxDuration}`);
@@ -448,21 +523,19 @@ export class SequenceRunner
         }
         if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed`);
 
-        const sequence = new Sequence(`seq-${this.next_id++}`, steps, max_duration_s, on_stop);
-        sequence.total_runs = runs;
+        return { label: spec.label, steps, on_stop, max_duration_s, runs };
+    }
+
+    /** Start a checked sequence on a clock shared with the others started in the same call */
+    private launch(p: PreparedSequence, clock: { started: Date; t0: number }): Sequence
+    {
+        const sequence = new Sequence(`seq-${this.next_id++}`, p.steps, p.max_duration_s, p.on_stop, p.label, clock);
+        sequence.total_runs = p.runs;
         this.sequences.set(sequence.id, sequence);
         this.forgetOld();
-        const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${max_duration_s} seconds`)), max_duration_s * 1000);
+        const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${p.max_duration_s} seconds`)), p.max_duration_s * 1000);
         sequence.done = this.run(sequence).finally(() => clearTimeout(timeout));
-        if (wait_s > 0) return await this.status(sequence.id, 0, wait_s, detail);
-        return {
-            sequence_id: sequence.id,
-            state: sequence.state,
-            started: sequence.started.toISOString(),
-            now: new Date().toISOString(),
-            steps: steps.length,
-            max_duration_s
-        };
+        return sequence;
     }
 
     /** The state and results of a sequence, from a result index. Waits up to wait_s for it to finish */
@@ -500,6 +573,7 @@ export class SequenceRunner
         const all = [...this.sequences.values()].reverse();
         const sequences = all.slice(0, limit).map((s) => ({
             sequence_id: s.id,
+            label: s.label,
             state: s.state,
             started: s.started.toISOString(),
             elapsed_s: round(s.finished_s ?? s.elapsed),
@@ -927,7 +1001,8 @@ export class SequenceRunner
                     if (latest !== undefined)
                     {
                         const deadline = latest + k * (step.repeat?.every_s ?? 0) * 1000;
-                        if (Date.now() > deadline)
+                        // Getting from one step to the next takes a millisecond or two, which is not lateness
+                        if (Date.now() > deadline + LATE_REPORTED_S * 1000)
                         {
                             const came = new Date();
                             const entry: StepResult = { step: i, iteration, action: step.action, label: step.label, started_s: round(sequence.elapsed), duration_s: 0 };
@@ -1063,6 +1138,7 @@ export class SequenceRunner
         const current = sequence.current;
         const report: Record<string, unknown> = {
             sequence_id: sequence.id,
+            label: sequence.label,
             state: sequence.state,
             started: sequence.started.toISOString(),
             ended: sequence.ended?.toISOString(),

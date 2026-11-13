@@ -101,6 +101,26 @@ async function fails(client: Client, name: string, args: Record<string, unknown>
     assert.match(r.content[0]!.text, expected);
 }
 
+/** The start_sequence arguments for one sequence, given in the form of a single sequence */
+function oneSequence(args: Record<string, unknown>): Record<string, unknown>
+{
+    const { steps, on_stop, service, max_duration_s, label, ...rest } = args;
+    return { ...rest, sequences: [{ steps, on_stop, service, max_duration_s, label }] };
+}
+
+/** Start one sequence and return its report */
+async function startSeq(args: Record<string, unknown>): Promise<any>
+{
+    const r = await ok(bridge, "robotraconteur_start_sequence", oneSequence(args));
+    assert.equal(r.sequences.length, 1);
+    return r.sequences[0];
+}
+
+async function failsStart(args: Record<string, unknown>, expected: RegExp): Promise<void>
+{
+    await fails(bridge, "robotraconteur_start_sequence", oneSequence(args), expected);
+}
+
 async function discover(client: Client, wanted: string[]): Promise<any[]>
 {
     const deadline = Date.now() + 45000;
@@ -488,7 +508,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
     test("runs steps on a schedule and reports each one", async () =>
     {
-        const started = await ok(bridge, "robotraconteur_start_sequence", {
+        const started = await startSeq({
             steps: [
                 { action: "call_function", service: "reynard", name: "say", arguments: ["Starting a sequence"] },
                 { action: "wait", seconds: 0.3 },
@@ -545,7 +565,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
             // Late, which a later max_late_s allows
             { action: "wait", seconds: 0.1, at_s: 0, max_late_s: 5 }
         ];
-        const compact = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", wait_s: 10, steps });
+        const compact = await startSeq({ service: "reynard", wait_s: 10, steps });
         assert.equal(compact.state, "completed", JSON.stringify(compact));
         // say and the first wait return nothing and are left out. The label and the value are kept,
         // and so is the last wait, which started late
@@ -560,13 +580,13 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual(full.results.map((r: any) => r.step), [0, 1, 2, 3, 4]);
         assert.equal(full.omitted, undefined);
 
-        const values = await ok(bridge, "robotraconteur_start_sequence", { service: TEST_SERVICE, wait_s: 10, steps: [{ action: "call_function", name: "func3", arguments: [1.5, 2.5] }] });
+        const values = await startSeq({ service: TEST_SERVICE, wait_s: 10, steps: [{ action: "call_function", name: "func3", arguments: [1.5, 2.5] }] });
         assert.equal(typeof values.results[0].result, "number", JSON.stringify(values.results[0]));
     });
 
     test("after times a step from when a labelled step ended", async () =>
     {
-        const status = await ok(bridge, "robotraconteur_start_sequence", {
+        const status = await startSeq({
             service: "reynard",
             wait_s: 10,
             detail: "full",
@@ -583,31 +603,31 @@ describe("timed sequences", { timeout: 300000 }, () =>
         // Its time had passed, since timed ran first, so it is late
         assert.ok(next.late_s > 0.2, JSON.stringify(next));
 
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 0.1, after: "nothing" }] }, /no earlier step has the label "nothing"/);
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 0.1, after: "later" }, { action: "wait", seconds: 0.1, label: "later" }] }, /no earlier step has the label "later"/);
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 0.1, label: "x" }, { action: "wait", seconds: 0.1, label: "x" }, { action: "wait", seconds: 0.1, after: "x" }] }, /used by more than one step/);
+        await failsStart({ service: "reynard", steps: [{ action: "wait", seconds: 0.1, after: "nothing" }] }, /no earlier step has the label "nothing"/);
+        await failsStart({ service: "reynard", steps: [{ action: "wait", seconds: 0.1, after: "later" }, { action: "wait", seconds: 0.1, label: "later" }] }, /no earlier step has the label "later"/);
+        await failsStart({ service: "reynard", steps: [{ action: "wait", seconds: 0.1, label: "x" }, { action: "wait", seconds: 0.1, label: "x" }, { action: "wait", seconds: 0.1, after: "x" }] }, /used by more than one step/);
     });
 
     test("every step is checked before anything starts", async () =>
     {
         const before = (await ok(bridge, "robotraconteur_sequence_status", {})).sequences.length;
         const say = { action: "call_function", service: "reynard", name: "say", arguments: ["Should not be said"] };
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [say, { action: "get_property", service: "reynard", name: "nothing" }] }, /steps\[1\] \(get_property nothing\): .*no property named "nothing".*was not started/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [say, { action: "call_function", service: "reynard", name: "teleport", arguments: [1] }] }, /steps\[1\].*takes 2 arguments/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "set_property", service: "reynard", name: "color" }] }, /set_property action needs value/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "set_property", service: "reynard", name: "color", value: "red" }] }, /steps\[0\]/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait" }] }, /needs seconds/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "robot_move_joints", service: "reynard", joint_position: [0], duration_s: 1 }] }, /execute_trajectory/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "call_function", service: "reynard", name: "say", args: ["x"] }] }, /args/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "read_wire", service: "reynard", name: "state", repeat: { count: 1000, every_s: 1 } }] }, /longer than max_duration_s/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [say], max_duration_s: 10000 }, /max_duration_s/);
+        await failsStart({ steps: [say, { action: "get_property", service: "reynard", name: "nothing" }] }, /steps\[1\] \(get_property nothing\): .*no property named "nothing".*was not started/);
+        await failsStart({ steps: [say, { action: "call_function", service: "reynard", name: "teleport", arguments: [1] }] }, /steps\[1\].*takes 2 arguments/);
+        await failsStart({ steps: [{ action: "set_property", service: "reynard", name: "color" }] }, /set_property action needs value/);
+        await failsStart({ steps: [{ action: "set_property", service: "reynard", name: "color", value: "red" }] }, /steps\[0\]/);
+        await failsStart({ steps: [{ action: "wait" }] }, /needs seconds/);
+        await failsStart({ steps: [{ action: "robot_move_joints", service: "reynard", joint_position: [0], duration_s: 1 }] }, /execute_trajectory/);
+        await failsStart({ steps: [{ action: "call_function", service: "reynard", name: "say", args: ["x"] }] }, /args/);
+        await failsStart({ steps: [{ action: "read_wire", service: "reynard", name: "state", repeat: { count: 1000, every_s: 1 } }] }, /longer than max_duration_s/);
+        await failsStart({ steps: [say], max_duration_s: 10000 }, /max_duration_s/);
         assert.equal((await ok(bridge, "robotraconteur_sequence_status", {})).sequences.length, before, "no sequence was started");
     });
 
     test("stops at a failed step unless the step continues on error", async () =>
     {
         const bad = { action: "call_function", service: "reynard", name: "teleport", arguments: ["NaN", 0] };
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [{ ...bad, continue_on_error: true }, bad, { action: "call_function", service: "reynard", name: "say", arguments: ["Not reached"] }]
         });
         const status = await finish(sequence_id);
@@ -619,7 +639,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
     test("a step that cannot start on time reports how late it was", async () =>
     {
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [{ action: "wait", seconds: 0.3 }, { action: "get_property", service: "reynard", name: "color", at_s: 0.1, max_late_s: 2 }]
         });
         const status = await finish(sequence_id);
@@ -628,7 +648,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(Math.abs(status.results[1].late_s - 0.2) < 0.05, JSON.stringify(status.results[1]));
 
         // Without max_late_s, which defaults to at_s, the late step fails rather than run late
-        const strict = await ok(bridge, "robotraconteur_start_sequence", {
+        const strict = await startSeq({
             wait_s: 10,
             steps: [{ action: "wait", seconds: 0.3 }, { action: "get_property", service: "reynard", name: "color", at_s: 0.1, label: "late" }]
         });
@@ -640,7 +660,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     {
         const service = "robot_b.robot";
         const target = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [{ action: "robot_move_joints", service, joint_position: target, duration_s: 4 }, { action: "call_function", service: "reynard", name: "say", arguments: ["Not reached"] }]
         });
         await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -668,7 +688,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_cancel_sequence", { sequence_id: "seq-0" }, /Unknown sequence "seq-0"/);
         const again = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
         assert.match(again.cancel, /already been cancelled before this cancel, so nothing was cancelled/);
-        const done = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 5, steps: [{ action: "wait", seconds: 0.1 }] });
+        const done = await startSeq({ wait_s: 5, steps: [{ action: "wait", seconds: 0.1 }] });
         assert.equal(done.state, "completed");
         const late = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id: done.sequence_id });
         assert.equal(late.state, "completed");
@@ -678,8 +698,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("two sequences run side by side, sampling a robot while it moves", async () =>
     {
         const service = "robot_a.robot";
-        const move = await ok(bridge, "robotraconteur_start_sequence", { steps: [{ action: "robot_move_joints", service, joint_position: [0.4, 0, 0, 0, 0, 0], duration_s: 2 }] });
-        const sample = await ok(bridge, "robotraconteur_start_sequence", { steps: [{ action: "read_wire", service, name: "robot_state", at_s: 0.5, repeat: { count: 4, every_s: 0.4 } }] });
+        const move = await startSeq({ steps: [{ action: "robot_move_joints", service, joint_position: [0.4, 0, 0, 0, 0, 0], duration_s: 2 }] });
+        const sample = await startSeq({ steps: [{ action: "read_wire", service, name: "robot_state", at_s: 0.5, repeat: { count: 4, every_s: 0.4 } }] });
         const samples = (await finish(sample.sequence_id)).results.map((r: any) => r.result.value.joint_position[0]);
         assert.equal((await finish(move.sequence_id)).state, "completed");
         for (let i = 1; i < samples.length; i++) assert.ok(samples[i] > samples[i - 1], `moving during the samples: ${samples.join(", ")}`);
@@ -694,7 +714,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         // The driver requires waypoints at most 100 ms apart: 0 to 0.3 rad over 3 s, every 50 ms
         const waypoints = Array.from({ length: 61 }, (_, i) => ({ time_from_start: i * 0.05, joint_position: [0.005 * i, 0, 0, 0, 0, 0] }));
         const trajectory = { joint_names: ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"], waypoints };
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [
                 { action: "set_property", service, name: "command_mode", value: "halt" },
                 { action: "wait", seconds: 0.1 },
@@ -725,7 +745,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("a cancel between steps says so, and the status shows the step being waited for", async () =>
     {
         const say = (n: number) => ({ action: "call_function", name: "say", arguments: [`Count ${n}`], at_s: 2 * n, label: `say ${n}` });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [say(0), say(1), say(2)] });
+        const { sequence_id } = await startSeq({ service: "reynard", steps: [say(0), say(1), say(2)] });
         await new Promise((resolve) => setTimeout(resolve, 800));
         const waiting = await ok(bridge, "robotraconteur_sequence_status", { sequence_id });
         assert.deepEqual({ step: waiting.current_step.step, waiting: waiting.current_step.waiting, starts_at_s: waiting.current_step.starts_at_s }, { step: 1, waiting: true, starts_at_s: 2 });
@@ -743,7 +763,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     {
         const service = TEST_SERVICE;
         await ok(bridge, "robotraconteur_read_events", { service });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             service,
             steps: [
                 { action: "stop_when", name: "ev2", condition: { d1: { $gt: 5 } }, label: "guard" },
@@ -771,7 +791,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
     test("stop_when that is never met lets the sequence complete", async () =>
     {
-        const status = await ok(bridge, "robotraconteur_start_sequence", {
+        const status = await startSeq({
             service: "reynard",
             wait_s: 10,
             steps: [
@@ -782,15 +802,15 @@ describe("timed sequences", { timeout: 300000 }, () =>
         });
         assert.equal(status.state, "completed", JSON.stringify(status));
         assert.equal(status.stopped_by, undefined);
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "stop_when", name: "color", condition: {}, timeout_s: 1 }] }, /The stop_when action does not use timeout_s/);
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "stop_when", name: "color", condition: {}, repeat: { count: 2, every_s: 1 } }] }, /A stop_when step cannot repeat/);
+        await failsStart({ service: "reynard", steps: [{ action: "stop_when", name: "color", condition: {}, timeout_s: 1 }] }, /The stop_when action does not use timeout_s/);
+        await failsStart({ service: "reynard", steps: [{ action: "stop_when", name: "color", condition: {}, repeat: { count: 2, every_s: 1 } }] }, /A stop_when step cannot repeat/);
     });
 
     test("end_stop_when stops a stop_when from watching", async () =>
     {
         const service = TEST_SERVICE;
         await ok(bridge, "robotraconteur_read_events", { service });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             service,
             steps: [
                 { action: "stop_when", name: "ev2", condition: {}, label: "guard" },
@@ -806,16 +826,16 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual(status.results.find((r: any) => r.label === "disarm").result, { ended: ["guard"] });
         assert.equal((await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" })).events.length, 1, "the event was not taken");
 
-        await fails(bridge, "robotraconteur_start_sequence", { service, steps: [{ action: "stop_when", name: "ev2", condition: {}, label: "guard" }, { action: "end_stop_when", target: "gaurd" }] }, /none has the label "gaurd"/);
-        await fails(bridge, "robotraconteur_start_sequence", { service, steps: [{ action: "end_stop_when" }] }, /no earlier stop_when step to end/);
-        await fails(bridge, "robotraconteur_start_sequence", { service, steps: [{ action: "stop_when", name: "ev2", condition: {} }, { action: "end_stop_when", name: "ev2" }] }, /The end_stop_when action does not use name/);
+        await failsStart({ service, steps: [{ action: "stop_when", name: "ev2", condition: {}, label: "guard" }, { action: "end_stop_when", target: "gaurd" }] }, /none has the label "gaurd"/);
+        await failsStart({ service, steps: [{ action: "end_stop_when" }] }, /no earlier stop_when step to end/);
+        await failsStart({ service, steps: [{ action: "stop_when", name: "ev2", condition: {} }, { action: "end_stop_when", name: "ev2" }] }, /The end_stop_when action does not use name/);
     });
 
     test("on_stop runs at once when a sequence stops, step by step even past a failure", async () =>
     {
         const service = TEST_SERVICE;
         await ok(bridge, "robotraconteur_read_events", { service });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             service: "reynard",
             steps: [{ action: "stop_when", service, name: "ev2", condition: {} }, { action: "wait", seconds: 20 }],
             on_stop: [
@@ -839,21 +859,21 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("on_stop runs on cancel but not on completion, and cannot wait", async () =>
     {
         const on_stop = [{ action: "get_property", name: "color" }];
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "wait", seconds: 20 }], on_stop });
+        const { sequence_id } = await startSeq({ service: "reynard", steps: [{ action: "wait", seconds: 20 }], on_stop });
         await new Promise((resolve) => setTimeout(resolve, 300));
         const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
         assert.equal(cancelled.state, "cancelled");
         assert.equal(cancelled.on_stop.length, 1, "cancel returns after on_stop has run");
         assert.ok(Array.isArray(cancelled.on_stop[0].result));
 
-        const completed = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", wait_s: 5, steps: [{ action: "wait", seconds: 0.1 }], on_stop });
+        const completed = await startSeq({ service: "reynard", wait_s: 5, steps: [{ action: "wait", seconds: 0.1 }], on_stop });
         assert.equal(completed.state, "completed");
         assert.equal(completed.on_stop, undefined);
 
         const steps = [{ action: "wait", seconds: 1 }];
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps, on_stop: [{ action: "wait", seconds: 1 }] }, /on_stop\[0\] \(wait\): on_stop runs at once, so it cannot use wait/);
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps, on_stop: [{ action: "get_property", name: "color", at_s: 1 }] }, /cannot use at_s/);
-        await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps, on_stop: [{ action: "get_property", name: "nothing" }] }, /on_stop\[0\] \(get_property nothing\): .*no property named "nothing".*was not started/);
+        await failsStart({ service: "reynard", steps, on_stop: [{ action: "wait", seconds: 1 }] }, /on_stop\[0\] \(wait\): on_stop runs at once, so it cannot use wait/);
+        await failsStart({ service: "reynard", steps, on_stop: [{ action: "get_property", name: "color", at_s: 1 }] }, /cannot use at_s/);
+        await failsStart({ service: "reynard", steps, on_stop: [{ action: "get_property", name: "nothing" }] }, /on_stop\[0\] \(get_property nothing\): .*no property named "nothing".*was not started/);
     });
 
     test("only_if runs or skips a step on the outcome of an earlier one", async () =>
@@ -867,7 +887,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         ];
         // No answer: the wait fails, so yes is skipped and no runs
         await ok(bridge, "robotraconteur_read_events", { service });
-        const missed = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 10, steps });
+        const missed = await startSeq({ wait_s: 10, steps });
         assert.equal(missed.state, "completed", JSON.stringify(missed));
         const by = (s: any) => Object.fromEntries(s.results.filter((r: any) => r.label).map((r: any) => [r.label, r]));
         assert.equal(by(missed).yes.skipped, true);
@@ -878,7 +898,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [9, 0] });
         const arrived_by = Date.now() + 10000;
         while (Date.now() < arrived_by && (await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", clear: false })).events.length === 0) await new Promise((resolve) => setTimeout(resolve, 100));
-        const answered = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 10, steps });
+        const answered = await startSeq({ wait_s: 10, steps });
         assert.equal(answered.state, "completed", JSON.stringify(answered));
         assert.ok(Array.isArray(by(answered).yes.result));
         assert.equal(by(answered).no.skipped, true);
@@ -897,22 +917,22 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const ran = (s: any) => s.on_stop.filter((r: any) => !r.skipped).map((r: any) => r.label);
 
         await ok(bridge, "robotraconteur_read_events", { service });
-        const stopped = await ok(bridge, "robotraconteur_start_sequence", { steps, on_stop });
+        const stopped = await startSeq({ steps, on_stop });
         await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [1, 0] });
         assert.deepEqual(ran(await finish(stopped.sequence_id)), ["by_stop", "always"]);
 
-        const cancelled = await ok(bridge, "robotraconteur_start_sequence", { steps, on_stop });
+        const cancelled = await startSeq({ steps, on_stop });
         await new Promise((resolve) => setTimeout(resolve, 300));
         assert.deepEqual(ran(await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id: cancelled.sequence_id })), ["by_cancel", "always"]);
 
         const get = { action: "get_property", service: "reynard", name: "color" };
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, only_if: { "_sequence.state": "failed" } }] }, /only on_stop steps can use/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, label: "_sequence" }] }, /The label _sequence is kept/);
+        await failsStart({ steps: [{ ...get, only_if: { "_sequence.state": "failed" } }] }, /only on_stop steps can use/);
+        await failsStart({ steps: [{ ...get, label: "_sequence" }] }, /The label _sequence is kept/);
     });
 
     test("a skipped step does not wait for its time or run its repeats", async () =>
     {
-        const status = await ok(bridge, "robotraconteur_start_sequence", {
+        const status = await startSeq({
             service: "reynard",
             wait_s: 10,
             detail: "full",
@@ -935,7 +955,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
     test("only_if works in on_stop, and is checked before starting", async () =>
     {
-        const status = await ok(bridge, "robotraconteur_start_sequence", {
+        const status = await startSeq({
             service: "reynard",
             wait_s: 10,
             steps: [{ action: "get_property", name: "color", label: "first" }, { action: "call_function", name: "teleport", arguments: ["NaN", 0] }],
@@ -949,10 +969,10 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(status.on_stop[1].skipped, true);
 
         const get = { action: "get_property", service: "reynard", name: "color" };
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, only_if: { "nothing.ok": true } }] }, /only_if uses "nothing", which is not the label of an earlier step/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, only_if: { "later.ok": true } }, { ...get, label: "later" }] }, /"later", which is not the label of an earlier step/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, label: "x" }, { ...get, label: "x" }, { ...get, only_if: { "x.ok": true } }] }, /labels more than one step/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: The condition is not a valid MongoDB query/);
+        await failsStart({ steps: [{ ...get, only_if: { "nothing.ok": true } }] }, /only_if uses "nothing", which is not the label of an earlier step/);
+        await failsStart({ steps: [{ ...get, only_if: { "later.ok": true } }, { ...get, label: "later" }] }, /"later", which is not the label of an earlier step/);
+        await failsStart({ steps: [{ ...get, label: "x" }, { ...get, label: "x" }, { ...get, only_if: { "x.ok": true } }] }, /labels more than one step/);
+        await failsStart({ steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: The condition is not a valid MongoDB query/);
     });
 
     test("a chat message from the diagnostics service stops a show at once, and on_stop reacts", async () =>
@@ -960,7 +980,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const diagnostics = "reynard_diagnostics";
         await ok(bridge, "robotraconteur_read_events", { service: "reynard" });
         await ok(bridge, "robotraconteur_call_function", { service: diagnostics, name: "clear_log" });
-        const status = await ok(bridge, "robotraconteur_start_sequence", {
+        const status = await startSeq({
             service: "reynard",
             wait_s: 10,
             steps: [
@@ -993,7 +1013,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     {
         const service = TEST_SERVICE;
         await ok(bridge, "robotraconteur_read_events", { service });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             service,
             steps: [
                 { action: "stop_when", name: "ev2", condition: { d1: { $gt: 5 } }, label: "stop" },
@@ -1012,7 +1032,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("stop_when halts a robot that passes a limit", async () =>
     {
         const service = "robot_b.robot";
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             service,
             steps: [
                 { action: "stop_when", name: "robot_state", condition: { "joint_position.0": { $gte: 0.2 } }, label: "limit", check_every_s: 0.02 },
@@ -1032,8 +1052,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("at starts steps of separate sequences at the same absolute time", async () =>
     {
         const at = new Date(Date.now() + 1500).toISOString();
-        const a = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "get_property", name: "color", at, label: "a" }] });
-        const b = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "read_wire", name: "state", at, label: "b" }] });
+        const a = await startSeq({ service: "reynard", steps: [{ action: "get_property", name: "color", at, label: "a" }] });
+        const b = await startSeq({ service: "reynard", steps: [{ action: "read_wire", name: "state", at, label: "b" }] });
         const wall = (s: any) => Date.parse(s.started) + s.results[0].started_s * 1000;
         const ra = await finish(a.sequence_id);
         const rb = await finish(b.sequence_id);
@@ -1046,7 +1066,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("a step with at fails rather than start late, unless max_late allows it", async () =>
     {
         const soon = () => new Date(Date.now() + 300).toISOString();
-        const late = await ok(bridge, "robotraconteur_start_sequence", {
+        const late = await startSeq({
             service: "reynard",
             wait_s: 10,
             steps: [{ action: "wait", seconds: 0.6 }, { action: "get_property", name: "color", at: soon(), label: "sync" }],
@@ -1059,7 +1079,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(Array.isArray(late.on_stop[0].result), "on_stop ran");
 
         const now = Date.now();
-        const allowed = await ok(bridge, "robotraconteur_start_sequence", {
+        const allowed = await startSeq({
             service: "reynard",
             wait_s: 10,
             steps: [{ action: "wait", seconds: 0.6 }, { action: "get_property", name: "color", at: new Date(now + 300).toISOString(), max_late: new Date(now + 1000).toISOString(), label: "sync" }]
@@ -1068,16 +1088,16 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(allowed.results.find((r: any) => r.label === "sync").late_s > 0.2);
 
         const get = { action: "get_property", service: "reynard", name: "color" };
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: new Date(Date.now() - 5000).toISOString() }] }, /s in the past/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: soon(), at_s: 1 }] }, /cannot be used with at_s or after/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late: soon() }] }, /max_late cannot be before at/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: "tomorrow" }] }, /at must be an ISO 8601 time/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [get], on_stop: [{ ...get, at: soon() }] }, /cannot use at/);
+        await failsStart({ steps: [{ ...get, at: new Date(Date.now() - 5000).toISOString() }] }, /s in the past/);
+        await failsStart({ steps: [{ ...get, at: soon(), at_s: 1 }] }, /cannot be used with at_s or after/);
+        await failsStart({ steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late: soon() }] }, /max_late cannot be before at/);
+        await failsStart({ steps: [{ ...get, at: "tomorrow" }] }, /at must be an ISO 8601 time/);
+        await failsStart({ steps: [get], on_stop: [{ ...get, at: soon() }] }, /cannot use at/);
     });
 
     test("a noop at an absolute time anchors relative steps, and max_late_s gives them deadlines", async () =>
     {
-        const status = await ok(bridge, "robotraconteur_start_sequence", {
+        const status = await startSeq({
             service: "reynard",
             wait_s: 10,
             steps: [
@@ -1098,15 +1118,53 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.ok(Math.abs(Date.parse(listed.now) - Date.now()) < 5000, "the list gives the server's time");
 
         const get = { action: "get_property", service: "reynard", name: "color" };
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late_s: 1 }] }, /cannot be used with at/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at_s: 1, max_late: new Date(Date.now() + 5000).toISOString(), max_late_s: 2 }] }, /not both/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at_s: 1, max_late_s: 0.5 }] }, /max_late_s cannot be before the step's at_s/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "noop", seconds: 1 }] }, /The noop action does not use seconds/);
+        await failsStart({ steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late_s: 1 }] }, /cannot be used with at/);
+        await failsStart({ steps: [{ ...get, at_s: 1, max_late: new Date(Date.now() + 5000).toISOString(), max_late_s: 2 }] }, /not both/);
+        await failsStart({ steps: [{ ...get, at_s: 1, max_late_s: 0.5 }] }, /max_late_s cannot be before the step's at_s/);
+        await failsStart({ steps: [{ action: "noop", seconds: 1 }] }, /The noop action does not use seconds/);
+    });
+
+    test("sequences started in one call share a clock, are checked together, and run on their own", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const started = await ok(bridge, "robotraconteur_start_sequence", {
+            sequences: [
+                { label: "stopper", service, steps: [{ action: "stop_when", name: "ev2", condition: {} }, { action: "get_property", service: "reynard", name: "color", at_s: 0.5, label: "together" }, { action: "wait", seconds: 10 }] },
+                { label: "runner", service: "reynard", steps: [{ action: "read_wire", name: "state", at_s: 0.5, label: "together" }, { action: "wait", seconds: 1.5 }] }
+            ]
+        });
+        assert.deepEqual(started.sequences.map((s: any) => s.label), ["stopper", "runner"]);
+        assert.equal(started.sequences[0].started, started.sequences[1].started, "one clock");
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [1, 0] });
+
+        const [stopper, runner] = await Promise.all(started.sequences.map((s: any) => (async () =>
+        {
+            let r = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: s.sequence_id, wait_s: 10 });
+            while (r.state === "running") r = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: s.sequence_id, wait_s: 10 });
+            return r;
+        })()));
+        assert.equal(stopper.state, "stopped", JSON.stringify(stopper));
+        assert.equal(runner.state, "completed", "stopping one does not stop the other");
+        const at = (r: any) => Date.parse(r.results.find((x: any) => x.label === "together").started);
+        assert.ok(Math.abs(at(stopper) - at(runner)) < 10, `at_s 0.5 in both started together: ${at(stopper) - at(runner)} ms apart`);
+
+        // One wrong step in any sequence, and none start
+        await fails(bridge, "robotraconteur_start_sequence", {
+            sequences: [{ service: "reynard", steps: [{ action: "get_property", name: "color" }] }, { label: "bad", service: "reynard", steps: [{ action: "get_property", name: "nothing" }] }]
+        }, /sequences\[1\] \(bad\): steps\[0\].*no property named "nothing".*None of the sequences were started/);
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ label: "x", service: "reynard", steps: [{ action: "noop" }] }, { label: "x", service: "reynard", steps: [{ action: "noop" }] }] }, /used by more than one sequence/);
+        const labels = (await ok(bridge, "robotraconteur_sequence_status", { limit: 50 })).sequences.map((s: any) => s.label);
+        assert.ok(!labels.includes("bad") && !labels.includes("x"), "the rejected calls started nothing");
+
+        // wait_s waits for them all
+        const both = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 10, sequences: [{ service: "reynard", steps: [{ action: "wait", seconds: 0.2 }] }, { service: "reynard", steps: [{ action: "wait", seconds: 0.6 }] }] });
+        assert.deepEqual(both.sequences.map((s: any) => s.state), ["completed", "completed"]);
     });
 
     test("a sequence that runs past max_duration_s is stopped", async () =>
     {
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [{ action: "wait", seconds: 0.4 }, { action: "wait", seconds: 0.4 }],
             max_duration_s: 0.5
         });
@@ -1119,8 +1177,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("wait_until waits for a robot to pass a position during a motion", async () =>
     {
         const service = "robot_a.robot";
-        const move = await ok(bridge, "robotraconteur_start_sequence", { steps: [{ action: "robot_move_joints", service, joint_position: [0.4, 0, 0, 0, 0, 0], duration_s: 2 }] });
-        const watch = await ok(bridge, "robotraconteur_start_sequence", {
+        const move = await startSeq({ steps: [{ action: "robot_move_joints", service, joint_position: [0.4, 0, 0, 0, 0, 0], duration_s: 2 }] });
+        const watch = await startSeq({
             steps: [{
                 action: "wait_until", service, name: "robot_state", timeout_s: 10,
                 condition: { "joint_position.0": { $gte: 0.3 }, "controller_state.name": "motor_on" }
@@ -1141,7 +1199,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     {
         await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.2, 0.4, 0.6] });
         const near = { $expr: { $lt: [{ $abs: { $subtract: [{ $arrayElemAt: ["$value", 1] }, 0.4] } }, 0.01] } };
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [
                 { action: "wait_until", service: "reynard", name: "color", condition: near, timeout_s: 2 },
                 { action: "wait_until", service: "reynard", name: "color", condition: { "value.0": { $gt: 5 } }, timeout_s: 0.3, check_every_s: 0.1 }
@@ -1159,19 +1217,19 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("wait_until conditions are checked before starting, and cannot run code", async () =>
     {
         const base = { action: "wait_until", service: "reynard", name: "color", timeout_s: 1 };
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { $where: "true" } }] }, /\$where is not allowed in a condition/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { $expr: { $function: { body: "x", args: [], lang: "js" } } } }] }, /\$function is not allowed/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { value: { $regex: "a" } } }] }, /\$regex is not allowed/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /not a valid MongoDB query: .*\$bogus/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {} }] }, /needs timeout_s/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...base, name: "teleport", condition: {} }] }, /"teleport" is a function, not a wire or property or event/);
+        await failsStart({ steps: [{ ...base, condition: { $where: "true" } }] }, /\$where is not allowed in a condition/);
+        await failsStart({ steps: [{ ...base, condition: { $expr: { $function: { body: "x", args: [], lang: "js" } } } }] }, /\$function is not allowed/);
+        await failsStart({ steps: [{ ...base, condition: { value: { $regex: "a" } } }] }, /\$regex is not allowed/);
+        await failsStart({ steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /not a valid MongoDB query: .*\$bogus/);
+        await failsStart({ steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {} }] }, /needs timeout_s/);
+        await failsStart({ steps: [{ ...base, name: "teleport", condition: {} }] }, /"teleport" is a function, not a wire or property or event/);
     });
 
     test("wait_until waits for an event whose arguments match, and takes it from the events", async () =>
     {
         const service = TEST_SERVICE;
         await ok(bridge, "robotraconteur_read_events", { service });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [{ action: "wait_until", service, name: "ev2", condition: { d1: { $gt: 5 } }, timeout_s: 10, label: "listen" }]
         });
         await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [1, 2] });
@@ -1201,7 +1259,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         {
             await new Promise((resolve) => setTimeout(resolve, 100));
         }
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [
                 { action: "wait_until", service, name: "ev1", condition: {}, timeout_s: 0.3, new_events_only: true, continue_on_error: true },
                 { action: "wait_until", service, name: "ev1", condition: {}, timeout_s: 2 },
@@ -1245,14 +1303,14 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
     test("steps may only use the fields of their action", async () =>
     {
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "read_events", service: "reynard", seconds: 1 }] }, /The read_events action does not use seconds\. It uses: service, name, clear, limit/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait", seconds: 1, service: "reynard" }] }, /The wait action does not use service/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "read_events", service: "reynard", name: "color" }] }, /"color" is a property, not an event/);
+        await failsStart({ steps: [{ action: "read_events", service: "reynard", seconds: 1 }] }, /The read_events action does not use seconds\. It uses: service, name, clear, limit/);
+        await failsStart({ steps: [{ action: "wait", seconds: 1, service: "reynard" }] }, /The wait action does not use service/);
+        await failsStart({ steps: [{ action: "read_events", service: "reynard", name: "color" }] }, /"color" is a property, not an event/);
     });
 
     test("a sequence can name one service for its steps, and start can wait for the end", async () =>
     {
-        const status = await ok(bridge, "robotraconteur_start_sequence", {
+        const status = await startSeq({
             service: "reynard",
             wait_s: 10,
             detail: "full",
@@ -1261,7 +1319,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.equal(status.state, "completed", JSON.stringify(status));
         assert.equal(status.results.length, 3);
         assert.ok(Array.isArray(status.results[2].result.value.robot_position));
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "get_property", name: "color" }] }, /get_property action needs service/);
+        await failsStart({ steps: [{ action: "get_property", name: "color" }] }, /get_property action needs service/);
     });
 
     test("one call starts a wait for an event and returns the event", async () =>
@@ -1269,7 +1327,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const service = TEST_SERVICE;
         await ok(bridge, "robotraconteur_read_events", { service });
         const started = Date.now();
-        const listen = ok(bridge, "robotraconteur_start_sequence", { service, wait_s: 20, steps: [{ action: "wait_until", name: "ev2", condition: {}, timeout_s: 20 }] });
+        const listen = startSeq({ service, wait_s: 20, steps: [{ action: "wait_until", name: "ev2", condition: {}, timeout_s: 20 }] });
         await new Promise((resolve) => setTimeout(resolve, 500));
         await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [4, 0] });
         const status = await listen;
@@ -1290,7 +1348,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
     {
         await ok(bridge, "robotraconteur_read_events", { service: TEST_SERVICE });
         await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.2, 0.4, 0.6] });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             service: TEST_SERVICE,
             steps: [{
                 action: "wait_until", timeout_s: 10,
@@ -1319,7 +1377,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const service = TEST_SERVICE;
         await ok(bridge, "robotraconteur_read_events", { service });
         await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.2, 0.2, 0.2] });
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             service,
             steps: [{
                 action: "wait_until", timeout_s: 10,
@@ -1349,22 +1407,22 @@ describe("timed sequences", { timeout: 300000 }, () =>
     {
         const watch = [{ key: "msg", service: TEST_SERVICE, name: "ev2", condition: {} }, { key: "col", service: "reynard", name: "color", condition: { "value.0": { $gt: 5 } } }];
         const step = { action: "wait_until", timeout_s: 1, watch };
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, combine: { msg: true, colour: true } }] }, /combine uses colour, which is not a key of watch\. The keys are: msg, col/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, watch: [watch[0], { ...watch[1], key: "msg" }] }] }, /key "msg" is used twice/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, name: "color", condition: {} }] }, /either watch, or name and condition/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {}, timeout_s: 1, combine: { color: true } }] }, /combine needs watch/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, watch: [watch[0], { ...watch[1], name: "teleport" }] }] }, /watch\[1\] \(col\): "teleport" is a function/);
-        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...step, watch: [{ name: "ev2", condition: {} }] }] }, /watch\[0\] needs service/);
+        await failsStart({ steps: [{ ...step, combine: { msg: true, colour: true } }] }, /combine uses colour, which is not a key of watch\. The keys are: msg, col/);
+        await failsStart({ steps: [{ ...step, watch: [watch[0], { ...watch[1], key: "msg" }] }] }, /key "msg" is used twice/);
+        await failsStart({ steps: [{ ...step, name: "color", condition: {} }] }, /either watch, or name and condition/);
+        await failsStart({ steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {}, timeout_s: 1, combine: { color: true } }] }, /combine needs watch/);
+        await failsStart({ steps: [{ ...step, watch: [watch[0], { ...watch[1], name: "teleport" }] }] }, /watch\[1\] \(col\): "teleport" is a function/);
+        await failsStart({ steps: [{ ...step, watch: [{ name: "ev2", condition: {} }] }] }, /watch\[0\] needs service/);
 
         await ok(bridge, "robotraconteur_read_events", { service: TEST_SERVICE });
-        const status = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 10, steps: [{ ...step, timeout_s: 0.3 }] });
+        const status = await startSeq({ wait_s: 10, steps: [{ ...step, timeout_s: 0.3 }] });
         assert.equal(status.state, "failed");
         assert.match(status.results[0].error, /The conditions were not met within 0\.3 seconds\. msg: no matching ev2 event; col: not met, last value \[/);
     });
 
     test("cancelling stops a wait_until at once", async () =>
     {
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [{ action: "wait_until", service: "reynard", name: "color", condition: { "value.0": { $gt: 5 } }, timeout_s: 30 }]
         });
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1376,7 +1434,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
     test("long result lists are returned over several calls", async () =>
     {
-        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+        const { sequence_id } = await startSeq({
             steps: [{ action: "get_property", service: "reynard", name: "color", repeat: { count: 300, every_s: 0.01 } }]
         });
         const first = await finish(sequence_id);
