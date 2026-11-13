@@ -21,7 +21,7 @@ import { errorText } from "./errors.js";
 import type { ReceivedEvent } from "./registry.js";
 import type { BridgeTools } from "./tools.js";
 
-export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when"] as const;
+export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when"] as const;
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number];
 
 /** One of the things a wait_until step watches, with its own condition */
@@ -86,6 +86,7 @@ export interface SequenceStep
     limit?: number;
     at_s?: number;
     after?: string;
+    target?: string;
     repeat?: { count: number; every_s: number };
     continue_on_error?: boolean;
 }
@@ -106,7 +107,8 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     robot_move_joints: ["service", "object", "joint_position", "duration_s"],
     wait: ["seconds"],
     wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"],
-    stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"]
+    stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"],
+    end_stop_when: ["target"]
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "repeat", "continue_on_error"];
 
@@ -245,6 +247,8 @@ class Sequence
     /** The stop_when step that stopped the sequence, and what it saw */
     stopped_by?: Record<string, unknown>;
     stop_message?: string;
+    /** The stop_when steps started, by step index, and whether each is still watching */
+    readonly monitors = new Map<number, { label?: string; active: boolean }>();
     total_runs = 0;
     readonly results: StepResult[] = [];
     readonly controller = new AbortController();
@@ -295,6 +299,12 @@ export class SequenceRunner
                     const earlier = steps.slice(0, i).filter((s) => s.label === step.after).length;
                     if (earlier === 0) throw new Error(`after must be the label of an earlier step, and no earlier step has the label "${step.after}".`);
                     if (steps.filter((s) => s.label === step.after).length > 1) throw new Error(`The label "${step.after}" is used by more than one step, so after cannot tell which one is meant. Give the steps different labels.`);
+                }
+                if (step.action === "end_stop_when")
+                {
+                    const earlier = steps.slice(0, i).filter((s) => s.action === "stop_when");
+                    if (earlier.length === 0) throw new Error("There is no earlier stop_when step to end.");
+                    if (step.target !== undefined && !earlier.some((s) => s.label === step.target)) throw new Error(`target must be the label of an earlier stop_when step, and none has the label "${step.target}". Leave target out to end every stop_when.`);
                 }
                 await this.check(step, max_duration_s);
             }
@@ -410,6 +420,7 @@ export class SequenceRunner
             if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error("The wait action needs seconds, from 0 up to max_duration_s.");
             return;
         }
+        if (step.action === "end_stop_when") return;
         if (step.action === "wait_until" || step.action === "stop_when")
         {
             if (step.action === "stop_when" && step.repeat) throw new Error("A stop_when step cannot repeat.");
@@ -545,6 +556,19 @@ export class SequenceRunner
         }
     }
 
+    /** An end_stop_when step: stop the stop_when steps it names, or all of them, from watching */
+    private endStopWhen(sequence: Sequence, step: SequenceStep): unknown
+    {
+        const ended: string[] = [];
+        for (const [index, m] of sequence.monitors)
+        {
+            if (!m.active || (step.target !== undefined && m.label !== step.target)) continue;
+            m.active = false;
+            ended.push(m.label ?? `steps[${index}]`);
+        }
+        return { ended };
+    }
+
     /** A stop_when step: start watching in the background, and go on to the next step at once */
     private async startStopWhen(sequence: Sequence, step: SequenceStep, index: number): Promise<unknown>
     {
@@ -638,9 +662,11 @@ export class SequenceRunner
         const started = performance.now();
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
         const which = `stop_when steps[${index}]${step.label ? ` (${step.label})` : ""}`;
+        const monitor = { label: step.label, active: true };
+        sequence.monitors.set(index, monitor);
         void (async () =>
         {
-            while (sequence.state === "running" && !signal.aborted)
+            while (sequence.state === "running" && !signal.aborted && monitor.active)
             {
                 const checked = performance.now();
                 let result: { met: boolean; outcomes: WatchOutcome[] };
@@ -650,12 +676,12 @@ export class SequenceRunner
                 }
                 catch (e)
                 {
-                    if (sequence.state !== "running" || signal.aborted) return;
+                    if (sequence.state !== "running" || signal.aborted || !monitor.active) return;
                     sequence.stopped_by = { step: index, label: step.label, error: errorText(e) };
                     sequence.controller.abort(new SequenceStopped("stopped", `${which} could not check its condition, so the sequence was stopped: ${errorText(e)}`));
                     return;
                 }
-                if (sequence.state !== "running" || signal.aborted) return;
+                if (sequence.state !== "running" || signal.aborted || !monitor.active) return;
                 if (result.met)
                 {
                     sequence.stopped_by = { step: index, label: step.label, ...this.takeMatched(p, result.outcomes, round((performance.now() - started) / 1000)) };
@@ -720,7 +746,7 @@ export class SequenceRunner
                     {
                         // A robot motion, a generator, or a wait stops itself when aborted, halting a robot
                         // first, so it is waited for. Other requests are left to finish in the background
-                        const action = step.action === "stop_when" ? this.startStopWhen(sequence, step, i) : this.act(step, signal);
+                        const action = step.action === "stop_when" ? this.startStopWhen(sequence, step, i) : step.action === "end_stop_when" ? Promise.resolve(this.endStopWhen(sequence, step)) : this.act(step, signal);
                         const result = SIGNALLED.includes(step.action) ? await action : await untilAborted(action, signal);
                         if (result !== null && result !== undefined) entry.result = result;
                     }

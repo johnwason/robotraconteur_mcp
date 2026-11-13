@@ -773,6 +773,31 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps: [{ action: "stop_when", name: "color", condition: {}, repeat: { count: 2, every_s: 1 } }] }, /A stop_when step cannot repeat/);
     });
 
+    test("end_stop_when stops a stop_when from watching", async () =>
+    {
+        const service = TEST_SERVICE;
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {
+            service,
+            steps: [
+                { action: "stop_when", name: "ev2", condition: {}, label: "guard" },
+                { action: "wait", seconds: 0.2 },
+                { action: "end_stop_when", target: "guard", label: "disarm" },
+                { action: "wait", seconds: 2.5 }
+            ]
+        });
+        // The event comes about a second after the call, once guard has been ended
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [9, 0] });
+        const status = await finish(sequence_id);
+        assert.equal(status.state, "completed", JSON.stringify(status));
+        assert.deepEqual(status.results.find((r: any) => r.label === "disarm").result, { ended: ["guard"] });
+        assert.equal((await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" })).events.length, 1, "the event was not taken");
+
+        await fails(bridge, "robotraconteur_start_sequence", { service, steps: [{ action: "stop_when", name: "ev2", condition: {}, label: "guard" }, { action: "end_stop_when", target: "gaurd" }] }, /none has the label "gaurd"/);
+        await fails(bridge, "robotraconteur_start_sequence", { service, steps: [{ action: "end_stop_when" }] }, /no earlier stop_when step to end/);
+        await fails(bridge, "robotraconteur_start_sequence", { service, steps: [{ action: "stop_when", name: "ev2", condition: {} }, { action: "end_stop_when", name: "ev2" }] }, /The end_stop_when action does not use name/);
+    });
+
     test("stop_when halts a robot that passes a limit", async () =>
     {
         const service = "robot_b.robot";
