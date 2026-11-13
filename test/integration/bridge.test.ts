@@ -1063,6 +1063,35 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_start_sequence", { steps: [get], on_stop: [{ ...get, at: soon() }] }, /cannot use at/);
     });
 
+    test("a noop at an absolute time anchors relative steps, and max_late_s gives them deadlines", async () =>
+    {
+        const status = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            steps: [
+                { action: "noop", at: new Date(Date.now() + 800).toISOString(), label: "start" },
+                { action: "get_property", name: "color", after: "start", at_s: 0.3, max_late_s: 0.35, label: "on_time" },
+                { action: "wait", seconds: 1 },
+                { action: "get_property", name: "color", after: "start", at_s: 0.5, max_late_s: 0.6, label: "missed" }
+            ]
+        });
+        assert.equal(status.state, "failed", JSON.stringify(status));
+        const by = Object.fromEntries(status.results.filter((r: any) => r.label).map((r: any) => [r.label, r]));
+        assert.ok(by.start.late_s !== undefined && by.start.late_s < 0.02, `the anchor reports its lateness: ${by.start.late_s}`);
+        assert.ok(by.on_time.late_s !== undefined && by.on_time.late_s < 0.02, `on time, and says so: ${by.on_time.late_s}`);
+        assert.ok(Math.abs(by.on_time.started_s - by.start.started_s - 0.3) < 0.03, "0.3 s after the anchor");
+        assert.match(by.missed.error, /after its latest start time/);
+
+        const listed = await ok(bridge, "robotraconteur_sequence_status", { limit: 1 });
+        assert.ok(Math.abs(Date.parse(listed.now) - Date.now()) < 5000, "the list gives the server's time");
+
+        const get = { action: "get_property", service: "reynard", name: "color" };
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late_s: 1 }] }, /cannot be used with at/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at_s: 1, max_late: new Date(Date.now() + 5000).toISOString(), max_late_s: 2 }] }, /not both/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, at_s: 1, max_late_s: 0.5 }] }, /max_late_s cannot be before the step's at_s/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ action: "noop", seconds: 1 }] }, /The noop action does not use seconds/);
+    });
+
     test("a sequence that runs past max_duration_s is stopped", async () =>
     {
         const { sequence_id } = await ok(bridge, "robotraconteur_start_sequence", {

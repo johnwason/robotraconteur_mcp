@@ -21,7 +21,7 @@ import { errorText } from "./errors.js";
 import type { ReceivedEvent } from "./registry.js";
 import type { BridgeTools } from "./tools.js";
 
-export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when"] as const;
+export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when", "noop"] as const;
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number];
 
 /** One of the things a wait_until step watches, with its own condition */
@@ -90,6 +90,7 @@ export interface SequenceStep
     after?: string;
     at?: string;
     max_late?: string;
+    max_late_s?: number;
     only_if?: Record<string, unknown>;
     target?: string;
     repeat?: { count: number; every_s: number };
@@ -113,13 +114,14 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     wait: ["seconds"],
     wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"],
     stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"],
-    end_stop_when: ["target"]
+    end_stop_when: ["target"],
+    noop: []
 };
-const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "at", "max_late", "only_if", "repeat", "continue_on_error"];
+const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "at", "max_late", "max_late_s", "only_if", "repeat", "continue_on_error"];
 
 /** Actions on_stop cannot use, since they wait, and fields it cannot use, since they schedule */
 const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints"];
-const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "at", "max_late", "repeat", "continue_on_error"];
+const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "at", "max_late", "max_late_s", "repeat", "continue_on_error"];
 /** The most steps on_stop can have, and how long they can take together */
 const MAX_ON_STOP = 20;
 const ON_STOP_LIMIT_S = 10;
@@ -504,7 +506,7 @@ export class SequenceRunner
             steps: s.steps.length,
             results: s.results.length
         }));
-        return { sequences, total: all.length, running: all.filter((s) => s.state === "running").length };
+        return { now: new Date().toISOString(), sequences, total: all.length, running: all.filter((s) => s.state === "running").length };
     }
 
     /** Stop every running sequence, such as when the server shuts down */
@@ -549,6 +551,12 @@ export class SequenceRunner
             const max_late = parseTime(step.max_late, "max_late");
             if (step.at !== undefined && max_late < parseTime(step.at, "at")) throw new Error("max_late cannot be before at.");
         }
+        if (step.max_late_s !== undefined)
+        {
+            if (step.at !== undefined) throw new Error("max_late_s counts like at_s, so it cannot be used with at. Use max_late, an absolute time, with at.");
+            if (step.max_late !== undefined) throw new Error("Give max_late or max_late_s, not both.");
+            if (!(step.max_late_s >= (step.at_s ?? 0) && step.max_late_s < max_duration_s)) throw new Error("max_late_s cannot be before the step's at_s, and must be less than max_duration_s.");
+        }
         if (step.repeat)
         {
             if (!Number.isInteger(step.repeat.count) || step.repeat.count < 1) throw new Error("repeat.count must be a whole number of at least 1.");
@@ -565,7 +573,7 @@ export class SequenceRunner
             if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error("The wait action needs seconds, from 0 up to max_duration_s.");
             return;
         }
-        if (step.action === "end_stop_when") return;
+        if (step.action === "end_stop_when" || step.action === "noop") return;
         if (step.action === "wait_until" || step.action === "stop_when")
         {
             if (step.action === "stop_when" && step.repeat) throw new Error("A stop_when step cannot repeat.");
@@ -675,6 +683,8 @@ export class SequenceRunner
         {
         case "wait":
             await sleep(step.seconds! * 1000, signal);
+            return null;
+        case "noop":
             return null;
         case "get_property":
             return (await this.tools.getProperty(s, step.object, step.name!)).value;
@@ -900,7 +910,10 @@ export class SequenceRunner
                 const base = step.at !== undefined ? (Date.parse(step.at) - sequence.started.getTime()) / 1000
                     : step.after !== undefined ? label_end.get(step.after)! + (step.at_s ?? 0) : step.at_s ?? previous_end;
                 // The latest a run may start, as an absolute time: max_late, or at if not given
-                const latest = step.max_late !== undefined ? Date.parse(step.max_late) : step.at !== undefined ? Date.parse(step.at) : undefined;
+                // max_late_s counts as at_s does, from the start of the sequence or with after, from that step's end
+                const latest = step.max_late !== undefined ? Date.parse(step.max_late)
+                    : step.max_late_s !== undefined ? sequence.started.getTime() + ((step.after !== undefined ? label_end.get(step.after)! : 0) + step.max_late_s) * 1000
+                        : step.at !== undefined ? Date.parse(step.at) : undefined;
                 const count = step.repeat?.count ?? 1;
                 for (let k = 0; k < count; k++)
                 {
@@ -929,7 +942,9 @@ export class SequenceRunner
                     const started = sequence.elapsed;
                     sequence.current = { step: i, iteration, waiting: false, starts_at_s: round(scheduled) };
                     const entry: StepResult = { step: i, iteration: step.repeat ? k : undefined, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
-                    if (started - scheduled > LATE_REPORTED_S) entry.late_s = round(started - scheduled);
+                    // Steps with a deadline always report their lateness, so that their timing can be read directly
+                    if (latest !== undefined) entry.late_s = round(Math.max(0, started - scheduled));
+                    else if (started - scheduled > LATE_REPORTED_S) entry.late_s = round(started - scheduled);
                     try
                     {
                         // A robot motion, a generator, or a wait stops itself when aborted, halting a robot
