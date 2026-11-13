@@ -37,7 +37,7 @@ struct LogEntry
     ## When, as an ISO 8601 UTC time with milliseconds, such as 2026-11-13T06:59:17.712Z, the form
     ## event times are given in
     field string time
-    ## say, color, teleport, set_arm_position, drive_robot, drive_arm, or message
+    ## say, color, teleport, set_arm_position, drive_robot, drive_arm, stop, or message
     field string kind
     ## The text said, or the chat message
     field string text
@@ -136,6 +136,11 @@ class InstrumentedReynard(Reynard):
     def drive_arm(self, q1, q2, q3, timeout=-1, wait=False):
         self._log.add("drive_arm", values=(*np.deg2rad((q1, q2, q3)), timeout, 1 if wait else 0))
         super().drive_arm(q1, q2, q3, timeout, wait)
+
+    def stop(self):
+        # Reynard 0.3.1 has no stop; the version with it is logged too
+        self._log.add("stop")
+        super().stop()
 
     @property
     def color(self):
