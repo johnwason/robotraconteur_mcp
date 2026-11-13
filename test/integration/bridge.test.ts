@@ -500,10 +500,12 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.match(started.sequence_id, /^seq-\d+$/);
         assert.equal(started.state, "running");
         assert.ok(Math.abs(Date.parse(started.started) - Date.now()) < 5000, started.started);
+        assert.ok(Date.parse(started.now) >= Date.parse(started.started), started.now);
 
         const status = await finish(started.sequence_id);
         assert.equal(status.state, "completed", JSON.stringify(status));
         assert.equal(status.started, started.started);
+        assert.ok(Date.parse(status.now) - Date.parse(status.started) >= 1500, `now is after the sequence ran: ${status.now}`);
         assert.equal(status.results.length, 10);
         assert.equal(status.more_results, false);
         assert.equal(status.next_index, 10);
@@ -794,6 +796,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const second = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2" });
         assert.deepEqual(second.events.map((e: any) => e.arguments.d1), [3]);
         assert.equal(second.remaining, 0);
+        assert.ok(Date.parse(second.now) >= Date.parse(second.events[0].time), "now is after the event");
         // The ev1 event was not taken by the reads of ev2
         assert.deepEqual((await ok(bridge, "robotraconteur_read_events", { service })).events.map((e: any) => e.event), ["ev1"]);
         await fails(bridge, "robotraconteur_read_events", { service, name: "func1" }, /"func1" is a function, not an event/);

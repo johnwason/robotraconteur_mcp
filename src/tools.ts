@@ -310,12 +310,16 @@ export class BridgeTools
         return { ok: true };
     }
 
-    /** The oldest events received, optionally only those of one event, removing them with clear */
+    /**
+     * The oldest events received, optionally only those of one event, removing them with clear. Also
+     * gives now, the server's current time, from the same clock as the events' times
+     */
     async readEvents(service: string, clear: boolean, limit: number, event?: string): Promise<Record<string, unknown>>
     {
         if (event !== undefined) member(await this.registry.resolve(service), event, ["event"]);
         const { events, remaining, dropped } = this.registry.takeEvents(service, clear, limit, event);
-        const out: Record<string, unknown> = { events, remaining };
+        // now is from the same clock as the events' times, so the model can tell how long they have waited
+        const out: Record<string, unknown> = { events, remaining, now: new Date().toISOString() };
         if (dropped > 0) out.dropped = dropped;
         if (remaining > 0) out.note = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting. Call again to get ${remaining === 1 ? "it" : "them"}.`;
         return out;

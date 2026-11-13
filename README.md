@@ -42,7 +42,7 @@ The computer must be on the same network as the devices. Discovery listens on UD
 | `robotraconteur_get_property`, `robotraconteur_set_property` | Read and write properties |
 | `robotraconteur_call_function` | Call a function. Generators run to completion |
 | `robotraconteur_read_wire`, `robotraconteur_write_wire` | Get or set the latest value of a wire |
-| `robotraconteur_read_events` | Return events the service has sent, oldest first, optionally only those of one name |
+| `robotraconteur_read_events` | Return events the service has sent, oldest first, optionally only those of one name, with the server's current time |
 | `robotraconteur_robot_move_joints` | Move a standard robot smoothly to joint positions |
 | `robotraconteur_start_sequence` | Start a timed sequence of steps and return its ID immediately |
 | `robotraconteur_sequence_status`, `robotraconteur_cancel_sequence` | Follow a sequence and get its results, or stop it |
@@ -113,7 +113,7 @@ This ends when a message arrives or the arm leaves `motor_on`, whichever is firs
 
 `robotraconteur_sequence_status` reports the state (`running`, `completed`, `failed`, `cancelled`, or `timed_out`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
 
-Results are compact by default: steps that succeeded without returning a value, and have no label and did not start late, are left out, and their number is given as `omitted`. `detail: "full"` gives every step, for example to check the timing of each one. A `call_function` step's result is the function's return value itself, or for a generator, how it ran and its last results.
+Results are compact by default: steps that succeeded without returning a value, and have no label and did not start late, are left out, and their number is given as `omitted`. `detail: "full"` gives every step, for example to check the timing of each one. Results also give `started`, when the sequence started, and `now`, the server's current time. `robotraconteur_read_events` gives `now` too. These come from the same clock as event times, so the model can tell how long something has run or a message has waited. A `call_function` step's result is the function's return value itself, or for a generator, how it ran and its last results.
 
 An optional JSON file, passed as the first argument, can limit what is used:
 
