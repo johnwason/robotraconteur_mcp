@@ -20,6 +20,19 @@ import { SEQUENCE_LIMITS } from "./sequence.js";
 export const HELP_TOPICS = ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"] as const;
 export type HelpTopic = typeof HELP_TOPICS[number];
 
+/** One line on each topic, for the tool description and the sequences category's list */
+export const HELP_TOPIC_SUMMARIES: Record<HelpTopic, string> = {
+    actions: "what each sequence action takes, the fields any step can use, and the limits",
+    timing: "at_s, after, at, the max_late and max_late_s deadlines, starting several things at the same instant, and waiting for results with wait_s and until",
+    waiting: "wait_until, with watch to wait for several things, combine, and check_every_s",
+    conditions: "writing MongoDB queries on wires, properties, and events, special values such as enums and 64-bit integers, and the operators allowed",
+    stopping: "stop_when, end_stop_when, the call's stop_when, stop_together, max_duration_s, and what a cancel stops",
+    on_stop: "cleanup steps after an early end, and querying how the sequence ended with _sequence",
+    skipping: "only_if on the outcomes of earlier labelled steps",
+    events: "which step takes an event, events received earlier, and new_events_only",
+    examples: "complete start_sequence calls"
+};
+
 const HELP: Record<HelpTopic, string> = {
     actions: `Actions take the arguments of the tool of the same name, on the step's service, or the sequence's service if the step names none. Steps can use different services.
 - get_property (name), set_property (name, value), read_wire (name), write_wire (name, value).

@@ -178,7 +178,12 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
 
     test("sequence help gives the rules by topic", async () =>
     {
-        const all = await call(bridge, "robotraconteur_help", {});
+        const categories = (await call(bridge, "robotraconteur_help", {})).content[0]!.text;
+        assert.match(categories, /- sequences: /);
+        assert.match(categories, /- standard_service_types: /);
+        const list = (await call(bridge, "robotraconteur_help", { category: "sequences" })).content[0]!.text;
+        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"]) assert.match(list, new RegExp(`- ${topic}: `));
+        const all = await call(bridge, "robotraconteur_help", { topics: ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"] });
         const text = all.content[0]!.text;
         for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"]) assert.match(text, new RegExp(`## ${topic}\n`));
         const timing = (await call(bridge, "robotraconteur_help", { topics: ["timing"] })).content[0]!.text;

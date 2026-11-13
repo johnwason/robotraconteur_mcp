@@ -20,6 +20,7 @@ import { loadConfig, ServiceRegistry } from "./registry.js";
 import { SEQUENCE_ACTIONS, SEQUENCE_LIMITS, SequenceRunner } from "./sequence.js";
 import type { CallStopWhen, SequenceSpec } from "./sequence.js";
 import { help, HELP_CATEGORIES } from "./help.js";
+import { HELP_TOPIC_SUMMARIES, HELP_TOPICS } from "./sequence_help.js";
 import { BridgeTools } from "./tools.js";
 
 type Result = Record<string, unknown>;
@@ -171,7 +172,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_start_sequence", {
-        description: `Start one or more timed sequences of steps, and return at once with each one's sequence_id. The steps run in the server without a round trip through the model, so their timing is exact. Before writing your first sequence, call robotraconteur_help: it has the rules for timing, waiting, conditions, stopping, on_stop, skipping, and events, and examples.
+        description: `Start one or more timed sequences of steps, and return at once with each one's sequence_id. The steps run in the server without a round trip through the model, so their timing is exact. Before writing your first sequence, read robotraconteur_help topics actions, timing, and stopping, and others as needed, such as waiting, conditions, on_stop, skipping, events, and examples, in one call.
 Essentials: steps of a sequence run one at a time, in order. Sequences in one call start together on one clock, and every step is checked before any starts, so nothing starts if any step is wrong. A step with at_s or at starts on time or fails. wait_until waits for a condition on a wire, property, or event. stop_when watches in the background and stops its sequence when its condition is met; to stop every sequence of a call on one condition, use the call's stop_when. An active stop_when, including the call's, holds only the events it matches, so the stop wins and other events still reach wait_until. on_stop steps clean up after any early end and cannot wait. The first step of any sequence to match an event takes it. Step arguments are fixed when the sequence starts: a step cannot use an earlier step's result, so branch on it with only_if, or read it and start a new sequence. Follow sequences with robotraconteur_sequence_status. A sequence keeps running if the conversation is interrupted. A cancel arrives a turn late, so put planned stops in max_duration_s or stop_when. Anything that must interrupt a running sequence, such as an operator request, a fault, or a sensor limit, needs a stop_when in that sequence or the call's stop_when, with on_stop to make the device safe; checked only between sequences, it waits until the running step ends.`,
         inputSchema: z.object({
             sequences: z.array(z.strictObject({
@@ -190,20 +191,12 @@ Essentials: steps of a sequence run one at a time, in order. Sequences in one ca
     }, (a) => respond(() => sequences.start(a.sequences as SequenceSpec[], a.wait_s ?? 0, a.detail ?? "compact", a.stop_when as CallStopWhen | undefined, a.until, a.stop_together ?? false)));
 
     server.registerTool("robotraconteur_help", {
-        description: `Detailed help, by category or topic, each page once. Without a category or topics, gives the sequences category. Topic names ignore case. Categories:
-sequences: the rules for robotraconteur_start_sequence. Call it before writing your first sequence, and when a rule is unclear. Its topics:
-- actions: what each sequence action takes, the fields any step can use, and the limits
-- timing: at_s, after, at, and the max_late and max_late_s deadlines, and starting several things at the same instant
-- waiting: wait_until, with watch to wait for several things, combine, and check_every_s
-- conditions: writing MongoDB queries on wires, properties, and events, special values such as enums and 64-bit integers, and the operators allowed
-- stopping: stop_when, end_stop_when, the call's stop_when, stop_together, max_duration_s, and what a cancel stops
-- on_stop: cleanup steps after an early end, and querying how the sequence ended with _sequence
-- skipping: only_if on the outcomes of earlier labelled steps
-- events: which step takes an event, events received earlier, and new_events_only
-- examples: complete start_sequence calls
+        description: `Detailed help. Ask for topics to read them, each once; names ignore case. A category alone lists its topics, and an empty request lists the categories. Categories:
+sequences: the rules for robotraconteur_start_sequence. Read the topics you need before writing your first sequence, and when a rule is unclear. Its topics:
+${HELP_TOPICS.map((t) => `- ${t}: ${HELP_TOPIC_SUMMARIES[t]}`).join("\n")}
 standard_service_types: lists the standard service definitions that robots, cameras, sensors, and other devices use, such as com.robotraconteur.robotics.robot. Their robdefs carry little documentation, so each one's documentation is a topic by its full name. robotraconteur_describe says which to read.`,
         inputSchema: z.object({
-            category: z.enum(HELP_CATEGORIES).optional().describe("A category: all the sequence topics, or the list of standard service definitions"),
+            category: z.enum(HELP_CATEGORIES).optional().describe("A category, to list its topics"),
             topics: z.array(z.string()).max(10).optional().describe("Topics to give: sequence topics, such as timing, or standard service definitions by full name, such as com.robotraconteur.robotics.robot")
         }),
         annotations: { readOnlyHint: true }

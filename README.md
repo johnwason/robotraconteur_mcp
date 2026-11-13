@@ -56,7 +56,7 @@ Services are named by `robotraconteur_discover` as `node.service`, and a name st
 
 ### Timed sequences
 
-The tool list is loaded on every turn of a conversation, so `robotraconteur_start_sequence` has a short description of the essentials, and the detailed rules below are given by `robotraconteur_help`, by topic: actions, timing, waiting, conditions, stopping, on_stop, skipping, events, and examples. The model is told to call it before writing its first sequence. The rules are in `src/sequence_help.ts`, kept in step with this section.
+The tool list is loaded on every turn of a conversation, so `robotraconteur_start_sequence` has a short description of the essentials, and the detailed rules below are given by `robotraconteur_help`, by topic: actions, timing, waiting, conditions, stopping, on_stop, skipping, events, and examples. The model is told to read the topics it needs, such as actions, timing, and stopping, in one call before writing its first sequence. In `robotraconteur_help`, topics give their pages, a category alone lists its topics, and an empty request lists the categories. The rules are in `src/sequence_help.ts`, kept in step with this section.
 
 Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of `sequences`, usually one, each with its steps, and returns their `sequence_id` values straight away:
 

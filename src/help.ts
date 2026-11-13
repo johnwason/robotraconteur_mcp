@@ -16,7 +16,7 @@
 // definitions, whose robdefs carry few docstrings. Pages are read on demand, so they cost nothing
 // until asked for.
 
-import { HELP_TOPICS, sequenceHelp } from "./sequence_help.js";
+import { HELP_TOPIC_SUMMARIES, HELP_TOPICS, sequenceHelp } from "./sequence_help.js";
 import type { HelpTopic } from "./sequence_help.js";
 import { STANDARD_DOCS } from "./standard_docs.js";
 import { isStandardService } from "./standard_help.js";
@@ -40,21 +40,39 @@ function findTopic(name: string): { kind: "sequence" | "standard"; name: string 
     return standard ? { kind: "standard", name: standard } : undefined;
 }
 
+/** What each category holds, for the list of categories */
+const CATEGORY_SUMMARIES: Record<HelpCategory, string> = {
+    sequences: "the rules for robotraconteur_start_sequence, by topic. Read the topics you need before writing your first sequence, such as actions, timing, and stopping",
+    standard_service_types: "the standard service definitions that robots, cameras, sensors, and other devices use, each a topic by its full name, such as com.robotraconteur.robotics.robot. Their robdefs carry little documentation, so it is here"
+};
+
+function categoryList(): string
+{
+    const lines = HELP_CATEGORIES.map((c) => `- ${c}: ${CATEGORY_SUMMARIES[c]}`);
+    return `## Categories\nAsk for a category to list its topics, then for topics to read them.\n${lines.join("\n")}`;
+}
+
+function sequenceTopicList(): string
+{
+    const lines = HELP_TOPICS.map((t) => `- ${t}: ${HELP_TOPIC_SUMMARIES[t]}`);
+    return `## sequences\nThe rules for robotraconteur_start_sequence. Each is a topic; ask for the ones you need, such as { "topics": ["actions", "timing", "stopping"] }.\n${lines.join("\n")}`;
+}
+
 /**
- * The help asked for: a category, topics, or both, each page once. With neither, or with an empty
- * list of topics, the sequences category. Unknown topics are named in a note after the pages found,
- * and are an error only if no topic was found
+ * The help asked for. Topics give their pages, each once, whether or not a category is given. A
+ * category alone lists its topics, and an empty request lists the categories. Unknown topics are
+ * named in a note after the pages found, and are an error only if none was found
  */
 export function help(category?: HelpCategory, topics?: string[]): string
 {
+    if (!topics?.length)
+    {
+        if (category === "sequences") return sequenceTopicList();
+        if (category === "standard_service_types") return standardIndex();
+        return categoryList();
+    }
     const parts: string[] = [];
     const given = new Set<string>();
-    if (category === "standard_service_types") parts.push(standardIndex());
-    if (category === "sequences" || (category === undefined && !topics?.length))
-    {
-        parts.push(sequenceHelp());
-        for (const t of HELP_TOPICS) given.add(t);
-    }
     const unknown: string[] = [];
     for (const t of topics ?? [])
     {

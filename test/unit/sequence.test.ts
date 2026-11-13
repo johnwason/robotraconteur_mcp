@@ -176,7 +176,11 @@ test("help gives each page once, ignores case, and notes unknown topics without 
 {
     const count = (text: string, heading: string) => text.split(heading).length - 1;
     const both = help("sequences", ["examples", "timing"]);
-    assert.equal(count(both, "## examples\n"), 1, "a topic the category includes is not repeated");
+    assert.equal(count(both, "## examples\n"), 1, "topics give their pages, with or without a category");
+    assert.doesNotMatch(both, /## stopping\n/, "and only those pages");
+    assert.match(help("sequences"), /^## sequences\n.*\n- actions: /s, "a category alone lists its topics");
+    assert.doesNotMatch(help("sequences"), /## actions\n/);
+    assert.match(help(), /^## Categories\n/, "an empty request lists the categories");
     assert.equal(count(help(undefined, ["timing", "timing"]), "## timing\n"), 1);
     assert.equal(count(help(undefined, ["Timing", "TIMING"]), "## timing\n"), 1, "names ignore case");
     assert.match(help(undefined, ["COM.robotraconteur.UUID"]), /# Service: `com\.robotraconteur\.uuid`/);
@@ -186,8 +190,8 @@ test("help gives each page once, ignores case, and notes unknown topics without 
     assert.match(mixed, /Note: Unknown topic bogus_topic\./);
     assert.throws(() => help(undefined, ["bogus_topic"]), /Unknown topic bogus_topic/);
     assert.equal(help(undefined, []), help(), "an empty list is the same as none");
-    const index = help("standard_service_types", ["com.robotraconteur.uuid"]);
-    assert.match(index, /## standard_service_types/);
-    assert.match(index, /# Service: `com\.robotraconteur\.uuid`/);
-    assert.doesNotMatch(index, /## timing/);
+    assert.match(help("standard_service_types"), /- com\.robotraconteur\.uuid: /);
+    const page = help("standard_service_types", ["com.robotraconteur.uuid"]);
+    assert.match(page, /# Service: `com\.robotraconteur\.uuid`/);
+    assert.doesNotMatch(page, /- com\.robotraconteur\.robotics\.robot: /, "topics give only their pages");
 });
