@@ -564,14 +564,20 @@ export class SequenceRunner
                     }))
                 };
             }
-            if (performance.now() >= deadline) throw new Error(this.notMet(step, watches, kinds, outcomes));
+            if (performance.now() >= deadline)
+            {
+                // With new_events_only, say how many earlier events were passed over, which shows the setting at work
+                const ignored = watches.map((w, i) => since !== undefined && kinds[i] === "event" ? this.tools.countEarlierEvents(w.service, w.name, w.test, since) : 0);
+                throw new Error(this.notMet(step, watches, kinds, outcomes, ignored));
+            }
             await sleep(Math.min(checked + every, deadline) - performance.now(), signal);
         }
     }
 
     /** Why a wait_until timed out, with the last value of each wire or property */
-    private notMet(step: SequenceStep, watches: Watch[], kinds: string[], outcomes: { matched: boolean; value?: unknown }[]): string
+    private notMet(step: SequenceStep, watches: Watch[], kinds: string[], outcomes: { matched: boolean; value?: unknown }[], ignored: number[]): string
     {
+        const passed = (n: number) => n === 0 ? "" : ` ${n} earlier matching ${n === 1 ? "event was" : "events were"} ignored because of new_events_only.`;
         const shown = (v: unknown, chars: number) =>
         {
             const text = JSON.stringify(v);
@@ -579,13 +585,13 @@ export class SequenceRunner
         };
         if (!step.watch)
         {
-            if (kinds[0] === "event") return `No ${step.name} event matching the condition arrived within ${step.timeout_s} seconds.`;
+            if (kinds[0] === "event") return `No ${step.name} event matching the condition arrived within ${step.timeout_s} seconds.${passed(ignored[0]!)}`;
             return `The condition was not met within ${step.timeout_s} seconds. The last value of ${step.name} was ${shown(outcomes[0]!.value, LAST_VALUE_CHARS)}`;
         }
         const each = watches.map((w, i) =>
         {
             const o = outcomes[i]!;
-            if (kinds[i] === "event") return `${w.key}: ${o.matched ? "a matching event is waiting" : `no matching ${w.name} event`}`;
+            if (kinds[i] === "event") return `${w.key}: ${o.matched ? "a matching event is waiting" : `no matching ${w.name} event`}${ignored[i] ? ` (${ignored[i]} earlier ignored because of new_events_only)` : ""}`;
             return `${w.key}: ${o.matched ? "met" : "not met"}, last value ${shown(o.value, WATCH_VALUE_CHARS)}`;
         });
         return `The ${step.combine ? "combined condition" : "conditions"} ${step.combine ? "was" : "were"} not met within ${step.timeout_s} seconds. ${each.join("; ")}`;
@@ -644,7 +650,8 @@ export class SequenceRunner
             if (e instanceof SequenceStopped)
             {
                 sequence.state = e.state;
-                sequence.error = e.message;
+                // stopped explains a cancel, which is not an error. Running out of time is
+                if (e.state === "timed_out") sequence.error = e.message;
             }
             else
             {

@@ -691,6 +691,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const cancelled = await ok(bridge, "robotraconteur_cancel_sequence", { sequence_id });
         assert.equal(cancelled.state, "cancelled");
         assert.match(cancelled.stopped, /^Between steps: nothing was running\. step 1 \(say 1\) was waiting for its time and did not start/);
+        assert.equal(cancelled.error, undefined, "a cancel is not an error");
         assert.equal(cancelled.not_run, 2);
         // All the results so far, not only the last
         assert.deepEqual(cancelled.results.map((r: any) => r.label), ["say 0"]);
@@ -800,7 +801,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         });
         const status = await finish(sequence_id);
         assert.equal(status.state, "failed");
-        assert.match(status.results[0].error, /No ev1 event matching the condition arrived within 0\.3 seconds/, "new_events_only ignores the earlier event");
+        assert.match(status.results[0].error, /No ev1 event matching the condition arrived within 0\.3 seconds\. 1 earlier matching event was ignored because of new_events_only/, "new_events_only ignores the earlier event and says so");
         assert.ok(status.results[1].result.waited_s < 0.2, `the earlier event was found at once: ${status.results[1].result.waited_s}`);
         assert.match(status.results[2].error, /No ev1 event matching the condition arrived within 0\.3 seconds/);
         assert.equal(status.stopped, undefined, "a failed sequence explains itself in error");

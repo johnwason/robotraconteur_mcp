@@ -291,6 +291,12 @@ export class ServiceRegistry
         return this.connect(name).events.find((e) => e.event === event && (since === undefined || Date.parse(e.time) >= since) && test(e.arguments));
     }
 
+    /** How many unread events with this name, received before a time in milliseconds, pass the test */
+    countEarlierEvents(name: string, event: string, test: (args: Record<string, unknown>) => boolean, before: number): number
+    {
+        return this.connect(name).events.filter((e) => e.event === event && Date.parse(e.time) < before && test(e.arguments)).length;
+    }
+
     /** Remove an event found with findEvent, so that read_events does not return it again */
     removeEvent(name: string, event: ReceivedEvent): void
     {

@@ -287,6 +287,12 @@ export class BridgeTools
         return this.registry.findEvent(service, event, test, since);
     }
 
+    /** How many unread events of this name, received before a time in milliseconds, pass the test */
+    countEarlierEvents(service: string, event: string, test: (args: Record<string, unknown>) => boolean, before: number): number
+    {
+        return this.registry.countEarlierEvents(service, event, test, before);
+    }
+
     /** Remove an event found with findEvent */
     removeEvent(service: string, event: ReceivedEvent): void
     {
