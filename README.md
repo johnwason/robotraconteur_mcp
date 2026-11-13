@@ -67,7 +67,7 @@ Each tool call is a round trip through the model, which takes seconds and varies
 ```
 
 - Actions are named after the tools and take the same arguments: `get_property`, `set_property`, `call_function`, `read_wire`, `write_wire`, `read_events`, and `robot_move_joints`, plus `wait` with `seconds`, and `wait_until`, described below.
-- Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later. `repeat` runs a step `count` times, `every_s` apart.
+- Steps run one at a time. A step starts when the previous one finishes, or at `at_s` seconds from the start if that is later, so steps with the same `at_s` run one after another, in order. `repeat` runs a step `count` times, `every_s` apart.
 - A `robot_move_joints` step finishes when the robot arrives. To do something during a motion, such as sampling a wire, start a second sequence; sequences run side by side.
 - Every step is checked before the sequence starts, including the services, members, values, and arguments, so a mistake is reported before anything moves.
 - A step may only use the fields of its action, so a field the action would ignore is reported rather than silently dropped.
@@ -112,6 +112,8 @@ This ends when a message arrives or the arm leaves `motor_on`, whichever is firs
 
 
 `robotraconteur_sequence_status` reports the state (`running`, `completed`, `failed`, `cancelled`, or `timed_out`) and each step's result. A result gives when the step started, in seconds from the start of the sequence, how long it took, how late it started if it was late, and its value or error. `wait_s` waits up to 30 seconds for the sequence to finish, and long result lists are returned over several calls using `from_index` and `next_index`. `robotraconteur_cancel_sequence` stops a sequence. A robot motion it started is aborted, and the robot is set to halt. Running sequences are also cancelled when the server shuts down. The 20 most recent finished sequences are kept.
+
+Results are compact by default: steps that succeeded without returning a value, and have no label and did not start late, are left out, and their number is given as `omitted`. `detail: "full"` gives every step, for example to check the timing of each one. A `call_function` step's result is the function's return value itself, or for a generator, how it ran and its last results.
 
 An optional JSON file, passed as the first argument, can limit what is used:
 

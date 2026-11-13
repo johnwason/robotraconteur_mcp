@@ -479,8 +479,9 @@ describe("timed sequences", { timeout: 300000 }, () =>
     async function finish(sequence_id: string, timeout_s = 30): Promise<any>
     {
         const deadline = Date.now() + timeout_s * 1000;
-        let status = await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 10 });
-        while (status.state === "running" && Date.now() < deadline) status = await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 10 });
+        // full, so that the tests can check the timing of every step
+        let status = await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 10, detail: "full" });
+        while (status.state === "running" && Date.now() < deadline) status = await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 10, detail: "full" });
         return status;
     }
 
@@ -523,6 +524,34 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual(status.results[9].result, [0, 1, 0]);
 
         await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.929, 0.49, 0.192] });
+    });
+
+    test("results are compact by default, and a function's value is not nested", async () =>
+    {
+        const steps = [
+            { action: "call_function", name: "say", arguments: ["Compact"] },
+            { action: "wait", seconds: 0.1 },
+            { action: "call_function", name: "teleport", arguments: [0, 0], label: "home" },
+            { action: "get_property", name: "color" },
+            { action: "wait", seconds: 0.1, at_s: 0 }
+        ];
+        const compact = await ok(bridge, "robotraconteur_start_sequence", { service: "reynard", wait_s: 10, steps });
+        assert.equal(compact.state, "completed", JSON.stringify(compact));
+        // say and the first wait return nothing and are left out. The label and the value are kept,
+        // and so is the last wait, which started late
+        assert.deepEqual(compact.results.map((r: any) => r.step), [2, 3, 4]);
+        assert.equal(compact.omitted, 2);
+        assert.equal(compact.results[0].result, undefined, "a void function has no result");
+        assert.ok(Array.isArray(compact.results[1].result), "get_property gives the value itself");
+        assert.ok(compact.results[2].late_s > 0);
+        assert.equal(compact.next_index, 5);
+
+        const full = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: compact.sequence_id, detail: "full" });
+        assert.deepEqual(full.results.map((r: any) => r.step), [0, 1, 2, 3, 4]);
+        assert.equal(full.omitted, undefined);
+
+        const values = await ok(bridge, "robotraconteur_start_sequence", { service: TEST_SERVICE, wait_s: 10, steps: [{ action: "call_function", name: "func3", arguments: [1.5, 2.5] }] });
+        assert.equal(typeof values.results[0].result, "number", JSON.stringify(values.results[0]));
     });
 
     test("every step is checked before anything starts", async () =>
@@ -782,6 +811,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const status = await ok(bridge, "robotraconteur_start_sequence", {
             service: "reynard",
             wait_s: 10,
+            detail: "full",
             steps: [{ action: "get_property", name: "color" }, { action: "wait", seconds: 0.2 }, { action: "read_wire", name: "state" }]
         });
         assert.equal(status.state, "completed", JSON.stringify(status));

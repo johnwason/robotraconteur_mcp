@@ -71,6 +71,9 @@ export interface SequenceStep
 
 export type SequenceState = "running" | "completed" | "failed" | "cancelled" | "timed_out";
 
+/** compact leaves out steps that succeeded without a value, a label, or lateness. full gives every step */
+export type ResultDetail = "compact" | "full";
+
 /** The fields each action uses, besides those every step can have */
 const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     get_property: ["service", "object", "name"],
@@ -242,7 +245,7 @@ export class SequenceRunner
      * by the steps that do not name one. With wait_s, waits up to that long for the sequence to finish
      * and reports it as status does
      */
-    async start(given_steps: SequenceStep[], max_duration_s = SEQUENCE_LIMITS.defaultDuration, service?: string, wait_s = 0): Promise<Record<string, unknown>>
+    async start(given_steps: SequenceStep[], max_duration_s = SEQUENCE_LIMITS.defaultDuration, service?: string, wait_s = 0, detail: ResultDetail = "compact"): Promise<Record<string, unknown>>
     {
         const steps = given_steps.map((s) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s);
         const running = [...this.sequences.values()].filter((s) => s.state === "running").length;
@@ -271,7 +274,7 @@ export class SequenceRunner
         this.forgetOld();
         const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${max_duration_s} seconds`)), max_duration_s * 1000);
         sequence.done = this.run(sequence).finally(() => clearTimeout(timeout));
-        if (wait_s > 0) return await this.status(sequence.id, 0, wait_s);
+        if (wait_s > 0) return await this.status(sequence.id, 0, wait_s, detail);
         return {
             sequence_id: sequence.id,
             state: sequence.state,
@@ -283,7 +286,7 @@ export class SequenceRunner
     }
 
     /** The state and results of a sequence, from a result index. Waits up to wait_s for it to finish */
-    async status(id: string, from_index = 0, wait_s = 0): Promise<Record<string, unknown>>
+    async status(id: string, from_index = 0, wait_s = 0, detail: ResultDetail = "compact"): Promise<Record<string, unknown>>
     {
         const sequence = this.get(id);
         if (sequence.state === "running" && wait_s > 0)
@@ -293,7 +296,7 @@ export class SequenceRunner
             await Promise.race([sequence.done, new Promise<void>((resolve) => timer = setTimeout(resolve, waited * 1000))]);
             clearTimeout(timer);
         }
-        return this.report(sequence, from_index);
+        return this.report(sequence, from_index, detail);
     }
 
     /** Stop a sequence. A robot motion it started is aborted and the robot halted */
@@ -484,7 +487,11 @@ export class SequenceRunner
             await this.tools.setProperty(s, step.object, step.name!, step.value);
             return null;
         case "call_function":
-            return await this.tools.callFunction(s, step.object, step.name!, step.arguments ?? [], step.generator_inputs, step.timeout_s ?? 60, signal);
+        {
+            // The function's return value itself, or for a generator, how it ran and its last results
+            const r = await this.tools.callFunction(s, step.object, step.name!, step.arguments ?? [], step.generator_inputs, step.timeout_s ?? 60, signal);
+            return "result" in r ? r.result : r;
+        }
         case "read_wire":
             return await this.tools.readWire(s, step.object, step.name!);
         case "write_wire":
@@ -642,17 +649,24 @@ export class SequenceRunner
         }
     }
 
-    private report(sequence: Sequence, from_index: number): Record<string, unknown>
+    private report(sequence: Sequence, from_index: number, detail: ResultDetail = "compact"): Record<string, unknown>
     {
         if (!Number.isInteger(from_index) || from_index < 0) throw new Error("from_index must be a whole number of at least 0");
         const results: StepResult[] = [];
         let bytes = 0;
+        let omitted = 0;
         let i = from_index;
         for (; i < sequence.results.length && results.length < MAX_STATUS_RESULTS; i++)
         {
-            const size = JSON.stringify(sequence.results[i]).length;
+            const r = sequence.results[i]!;
+            if (detail === "compact" && r.error === undefined && r.result === undefined && r.label === undefined && r.late_s === undefined)
+            {
+                omitted++;
+                continue;
+            }
+            const size = JSON.stringify(r).length;
             if (results.length > 0 && bytes + size > MAX_STATUS_BYTES) break;
-            results.push(sequence.results[i]!);
+            results.push(r);
             bytes += size;
         }
         const current = sequence.current;
@@ -667,6 +681,7 @@ export class SequenceRunner
         if (current) report.current_step = { step: current.step, iteration: current.iteration, action: sequence.steps[current.step]!.action, label: sequence.steps[current.step]!.label };
         if (sequence.error) report.error = sequence.error;
         report.results = results;
+        if (omitted > 0) report.omitted = omitted;
         report.next_index = i;
         report.more_results = i < sequence.results.length;
         // JSON leaves out undefined, which keeps the results compact
