@@ -1,8 +1,7 @@
 #!/bin/sh
 # Run a command in an isolated container, for builds and tests. The internal network has no route to
-# the host or the internet. robotraconteur_typescript is mounted read only for its Python test server.
+# the host or the internet.
 cd "$(dirname "$0")/.." || exit 1
-root=$(cd .. && pwd)
 
 # Each run gets its own network, so separate sessions can't find each other's services
 network=rr-mcp-isolated-$$
@@ -14,7 +13,6 @@ exec 3<&0
 podman run --rm -i --network="$network" --memory=4g \
     -v "$PWD:/work/robotraconteur_mcp:Z" \
     -v /work/robotraconteur_mcp/node_modules \
-    -v "$root/robotraconteur_typescript:/work/robotraconteur_typescript:ro,Z" \
     -w /work/robotraconteur_mcp rr-ts-mcp-dev "$@" <&3 3<&- &
 pid=$!
 exec 3<&-

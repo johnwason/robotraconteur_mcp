@@ -1,0 +1,71 @@
+name: CI
+
+# Runs the tests on every push and pull request, against Reynard, simulated robots, and Core's test
+# services, then builds the single file server and tests it too. The bundle is kept as an artifact
+# of the run.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22.12.0
+  PYTHON_VERSION: "3.12"
+  RR_CORE_VERSION: v1.2.9
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # Core's Python test services, which test/services/rr_test_server.py runs
+      RR_CORE_TEST: ${{ github.workspace }}/rr-core/test
+    defaults:
+      run:
+        working-directory: robotraconteur_mcp
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: robotraconteur_mcp
+    - name: Checkout Robot Raconteur Core test services
+      uses: actions/checkout@v7
+      with:
+        repository: robotraconteur/robotraconteur
+        ref: ${{ env.RR_CORE_VERSION }}
+        path: rr-core
+        sparse-checkout: test
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+    - name: Setup Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    - name: Install Python packages
+      # The same packages as the Dockerfile and the image it is built on
+      run: >-
+        python -m pip install "robotraconteur==${RR_CORE_VERSION#v}" numpy
+        "robotraconteur-abstract-robot==0.2.3" "robotraconteurcompanion==0.4.0"
+        "general-robotics-toolbox==0.7.3" "reynard-the-robot==0.3.1" scipy pyyaml
+    - name: Install Node.js packages
+      run: npm ci
+    - name: Test
+      run: npm test
+    - name: Bundle
+      run: npm run bundle
+    - name: Test the bundle
+      run: node --test --test-concurrency=1 "dist-test/test/integration/*.test.js"
+      env:
+        RR_MCP_SERVER: dist-bundle/robotraconteur-mcp.mjs
+    - name: Keep the bundle
+      uses: actions/upload-artifact@v7
+      with:
+        name: robotraconteur-mcp
+        path: |
+          robotraconteur_mcp/dist-bundle/robotraconteur-mcp.mjs
+          robotraconteur_mcp/dist-bundle/THIRD_PARTY_LICENSES.txt
