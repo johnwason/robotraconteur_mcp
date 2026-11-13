@@ -82,7 +82,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     });
 
     server.registerTool("robotraconteur_discover", {
-        description: "List the Robot Raconteur services found so far on the network: devices such as robots, cameras, and sensors. Start here. It answers immediately while searching continues in the background, so if searching is true and something is missing, call it again after check_again_after_s seconds. Use robotraconteur_describe to see what a service can do.",
+        description: "List the Robot Raconteur services found so far on the network: devices such as robots, cameras, and sensors. Start here. It answers immediately while searching continues in the background, so if searching is true and something is missing, call it again after check_again_after_s seconds. Use robotraconteur_describe to see what a service can do. Each service's name in service is the exact name to use with the other tools, made from the node name and the service name. It is unique and stays the same while the server runs: names are kept by node ID, and when two nodes share a node name, the later one's name includes part of its node ID. nodeId identifies the node. A node that restarts with a new node ID gets a new name, so a running sequence never switches to a different node.",
         inputSchema: z.object({ refresh: z.boolean().optional().describe("Start a new search in the background, for a device that may have just appeared") }),
         annotations: { readOnlyHint: true }
     }, ({ refresh }) => respond(() => tools.discover(refresh ?? false)));
