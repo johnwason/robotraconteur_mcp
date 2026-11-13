@@ -845,6 +845,57 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_start_sequence", { service: "reynard", steps, on_stop: [{ action: "get_property", name: "nothing" }] }, /on_stop\[0\] \(get_property nothing\): .*no property named "nothing".*was not started/);
     });
 
+    test("only_if runs or skips a step on the outcome of an earlier one", async () =>
+    {
+        const service = TEST_SERVICE;
+        const steps = [
+            { action: "wait_until", service, name: "ev2", condition: {}, timeout_s: 0.5, label: "answer", continue_on_error: true },
+            { action: "get_property", service: "reynard", name: "color", label: "yes", only_if: { "answer.ok": true } },
+            { action: "get_property", service: "reynard", name: "color", label: "no", only_if: { "answer.ok": false } },
+            { action: "get_property", service: "reynard", name: "color", label: "big", only_if: { "answer.result.event.arguments.d1": { $gt: 5 } } }
+        ];
+        // No answer: the wait fails, so yes is skipped and no runs
+        await ok(bridge, "robotraconteur_read_events", { service });
+        const missed = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 10, steps });
+        assert.equal(missed.state, "completed", JSON.stringify(missed));
+        const by = (s: any) => Object.fromEntries(s.results.filter((r: any) => r.label).map((r: any) => [r.label, r]));
+        assert.equal(by(missed).yes.skipped, true);
+        assert.ok(Array.isArray(by(missed).no.result));
+        assert.equal(by(missed).big.skipped, true);
+
+        // An answer with d1 9: yes and big run, no is skipped
+        await ok(bridge, "robotraconteur_call_function", { service, name: "func2", arguments: [9, 0] });
+        const arrived_by = Date.now() + 10000;
+        while (Date.now() < arrived_by && (await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", clear: false })).events.length === 0) await new Promise((resolve) => setTimeout(resolve, 100));
+        const answered = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 10, steps });
+        assert.equal(answered.state, "completed", JSON.stringify(answered));
+        assert.ok(Array.isArray(by(answered).yes.result));
+        assert.equal(by(answered).no.skipped, true);
+        assert.ok(Array.isArray(by(answered).big.result));
+    });
+
+    test("only_if works in on_stop, and is checked before starting", async () =>
+    {
+        const status = await ok(bridge, "robotraconteur_start_sequence", {
+            service: "reynard",
+            wait_s: 10,
+            steps: [{ action: "get_property", name: "color", label: "first" }, { action: "call_function", name: "teleport", arguments: ["NaN", 0] }],
+            on_stop: [
+                { action: "get_property", name: "color", label: "ran", only_if: { "first.ok": true } },
+                { action: "get_property", name: "color", label: "skipped", only_if: { "first.ok": false } }
+            ]
+        });
+        assert.equal(status.state, "failed");
+        assert.ok(Array.isArray(status.on_stop[0].result));
+        assert.equal(status.on_stop[1].skipped, true);
+
+        const get = { action: "get_property", service: "reynard", name: "color" };
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, only_if: { "nothing.ok": true } }] }, /only_if uses "nothing", which is not the label of an earlier step/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, only_if: { "later.ok": true } }, { ...get, label: "later" }] }, /"later", which is not the label of an earlier step/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, label: "x" }, { ...get, label: "x" }, { ...get, only_if: { "x.ok": true } }] }, /labels more than one step/);
+        await fails(bridge, "robotraconteur_start_sequence", { steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: The condition is not a valid MongoDB query/);
+    });
+
     test("stop_when halts a robot that passes a limit", async () =>
     {
         const service = "robot_b.robot";

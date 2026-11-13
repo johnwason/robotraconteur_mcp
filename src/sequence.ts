@@ -86,6 +86,7 @@ export interface SequenceStep
     limit?: number;
     at_s?: number;
     after?: string;
+    only_if?: Record<string, unknown>;
     target?: string;
     repeat?: { count: number; every_s: number };
     continue_on_error?: boolean;
@@ -110,7 +111,7 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"],
     end_stop_when: ["target"]
 };
-const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "repeat", "continue_on_error"];
+const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "only_if", "repeat", "continue_on_error"];
 
 /** Actions on_stop cannot use, since they wait, and fields it cannot use, since they schedule */
 const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints"];
@@ -158,6 +159,7 @@ interface StepResult
     late_s?: number;
     result?: unknown;
     error?: string;
+    skipped?: boolean;
 }
 
 class SequenceStopped extends Error
@@ -237,10 +239,44 @@ function combineFields(x: unknown, out = new Set<string>()): Set<string>
     return out;
 }
 
+/**
+ * Check an only_if query: valid, and using only the labels of steps that come before, which must be
+ * unique so that it is clear which step each means
+ */
+function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceStep[]): void
+{
+    try
+    {
+        compileCondition(only_if);
+    }
+    catch (e)
+    {
+        throw new Error(`only_if: ${errorText(e)}`);
+    }
+    for (const label of combineFields(only_if))
+    {
+        if (!earlier.some((s) => s.label === label)) throw new Error(`only_if uses "${label}", which is not the label of an earlier step. It queries earlier labelled steps by label, such as { "${label}.ok": true }.`);
+        if (all.filter((s) => s.label === label).length > 1) throw new Error(`only_if uses "${label}", which labels more than one step. Give the steps different labels.`);
+    }
+}
+
 function describeStep(step: SequenceStep, i: number): string
 {
     const what = [step.action, step.label ?? step.name].filter((x) => x).join(" ");
     return `steps[${i}] (${what})`;
+}
+
+/** Keep a step's result, and its outcome by label for only_if */
+function record(sequence: Sequence, step: SequenceStep, entry: StepResult): void
+{
+    sequence.results.push(entry);
+    if (step.label !== undefined) sequence.outcomes.set(step.label, { ok: entry.error === undefined && !entry.skipped, skipped: entry.skipped === true, result: entry.result, error: entry.error });
+}
+
+/** Whether a step's only_if holds, from the outcomes of the labelled steps so far */
+function onlyIf(sequence: Sequence, only_if: Record<string, unknown>): boolean
+{
+    return compileCondition(only_if)(Object.fromEntries(sequence.outcomes));
 }
 
 class Sequence
@@ -265,6 +301,8 @@ class Sequence
     ended?: Date;
     done!: Promise<void>;
 
+    /** The latest outcome of each labelled step, which only_if queries */
+    readonly outcomes = new Map<string, { ok: boolean; skipped: boolean; result?: unknown; error?: string }>();
     /** The results of the on_stop steps, if they ran */
     on_stop_results?: StepResult[];
 
@@ -303,6 +341,7 @@ export class SequenceRunner
             if (timing.length > 0) throw new Error(`${where}: on_stop steps run at once and in order, each even if another fails, so they cannot use ${timing.join(", ")}. The sequence was not started.`);
             try
             {
+                if (step.only_if !== undefined) checkOnlyIf(step.only_if, steps, steps);
                 await this.check(step, SEQUENCE_LIMITS.maxDuration);
             }
             catch (e)
@@ -328,6 +367,7 @@ export class SequenceRunner
                     if (earlier === 0) throw new Error(`after must be the label of an earlier step, and no earlier step has the label "${step.after}".`);
                     if (steps.filter((s) => s.label === step.after).length > 1) throw new Error(`The label "${step.after}" is used by more than one step, so after cannot tell which one is meant. Give the steps different labels.`);
                 }
+                if (step.only_if !== undefined) checkOnlyIf(step.only_if, steps.slice(0, i), steps);
                 if (step.action === "end_stop_when")
                 {
                     const earlier = steps.slice(0, i).filter((s) => s.action === "stop_when");
@@ -776,6 +816,12 @@ export class SequenceRunner
                     sequence.current = { step: i, iteration, waiting: false, starts_at_s: round(scheduled) };
                     const entry: StepResult = { step: i, iteration: step.repeat ? k : undefined, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
                     if (started - scheduled > LATE_REPORTED_S) entry.late_s = round(started - scheduled);
+                    if (step.only_if !== undefined && !onlyIf(sequence, step.only_if))
+                    {
+                        entry.skipped = true;
+                        record(sequence, step, entry);
+                        continue;
+                    }
                     try
                     {
                         // A robot motion, a generator, or a wait stops itself when aborted, halting a robot
@@ -789,13 +835,13 @@ export class SequenceRunner
                         const stopped = e instanceof SequenceStopped ? e : signal.aborted ? signal.reason as SequenceStopped : undefined;
                         entry.error = stopped ? stopped.message : errorText(e);
                         entry.duration_s = round(sequence.elapsed - started);
-                        sequence.results.push(entry);
+                        record(sequence, step, entry);
                         if (stopped) throw stopped;
                         if (!step.continue_on_error) throw new Error(`${describeStep(step, i)} failed: ${entry.error}`);
                         continue;
                     }
                     entry.duration_s = round(sequence.elapsed - started);
-                    sequence.results.push(entry);
+                    record(sequence, step, entry);
                 }
                 previous_end = sequence.elapsed;
                 if (step.label !== undefined) label_end.set(step.label, previous_end);
@@ -842,6 +888,12 @@ export class SequenceRunner
             {
                 const started = sequence.elapsed;
                 const entry: StepResult = { step: i, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
+                if (step.only_if !== undefined && !onlyIf(sequence, step.only_if))
+                {
+                    entry.skipped = true;
+                    sequence.on_stop_results.push(entry);
+                    continue;
+                }
                 try
                 {
                     if (controller.signal.aborted) throw controller.signal.reason;
@@ -872,7 +924,7 @@ export class SequenceRunner
         for (; i < sequence.results.length && results.length < MAX_STATUS_RESULTS; i++)
         {
             const r = sequence.results[i]!;
-            if (detail === "compact" && r.error === undefined && r.result === undefined && r.label === undefined && r.late_s === undefined)
+            if (detail === "compact" && r.error === undefined && r.result === undefined && r.label === undefined && r.late_s === undefined && !r.skipped)
             {
                 omitted++;
                 continue;
