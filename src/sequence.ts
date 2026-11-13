@@ -389,6 +389,43 @@ function record(sequence: Sequence, step: SequenceStep, entry: StepResult): void
 {
     sequence.results.push(entry);
     if (step.label !== undefined) sequence.outcomes.set(step.label, { ok: entry.error === undefined && !entry.skipped, skipped: entry.skipped === true, result: entry.result, error: entry.error });
+    for (const l of [...sequence.result_listeners]) l(entry);
+}
+
+/**
+ * Wait until all the sequences have ended, one of them has a result for a step labelled until, or
+ * wait_s passes, whichever is first. Says whether the until step has a result
+ */
+async function waitFor(sequences: Sequence[], wait_s: number, until?: string): Promise<boolean>
+{
+    const has = () => until !== undefined && sequences.some((s) => s.results.some((r) => r.label === until));
+    if (has() || sequences.every((s) => s.state !== "running")) return has();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let listener: ((r: StepResult) => void) | undefined;
+    const label = until === undefined ? new Promise<void>(() => undefined) : new Promise<void>((resolve) =>
+    {
+        listener = (r) =>
+        {
+            if (r.label === until) resolve();
+        };
+        for (const s of sequences) s.result_listeners.add(listener);
+    });
+    try
+    {
+        await Promise.race([Promise.all(sequences.map((s) => s.done)), label, new Promise<void>((resolve) => timer = setTimeout(resolve, Math.min(wait_s, SEQUENCE_LIMITS.maxStatusWait) * 1000))]);
+    }
+    finally
+    {
+        clearTimeout(timer);
+        if (listener) for (const s of sequences) s.result_listeners.delete(listener);
+    }
+    return has();
+}
+
+/** Refuse an until that is not the label of a step of these sequences */
+function checkUntil(until: string, sequences: { steps: SequenceStep[] }[]): void
+{
+    if (!sequences.some((s) => s.steps.some((step) => step.label === until))) throw new Error(`until must be the label of a step, and no step has the label "${until}".`);
 }
 
 /**
@@ -416,6 +453,8 @@ class Sequence
     /** The stop_when steps started, by step index, and whether each is still watching */
     /** The stop_when steps started, by step index, and whether each is still watching. A call's stop_when has index -1 */
     readonly monitors = new Map<number, { label?: string; active: boolean; watch: PreparedWatch }>();
+    /** Called with each step result as it is recorded, for until */
+    readonly result_listeners = new Set<(r: StepResult) => void>();
     /** The watches of its stop_when steps, prepared when the sequence was checked */
     prepared_watches = new Map<number, PreparedWatch>();
     total_runs = 0;
@@ -466,8 +505,13 @@ export class SequenceRunner
      * used by its steps that do not name one. With wait_s, waits up to that long for them all to
      * finish, and reports each as status does
      */
-    async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact", call_stop?: CallStopWhen): Promise<Record<string, unknown>>
+    async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact", call_stop?: CallStopWhen, until?: string): Promise<Record<string, unknown>>
     {
+        if (until !== undefined)
+        {
+            if (!(wait_s > 0)) throw new Error("until needs wait_s, since it says when to stop waiting.");
+            checkUntil(until, specs);
+        }
         if (specs.length === 0) throw new Error("Give at least one sequence in sequences.");
         const running = [...this.sequences.values()].filter((s) => s.state === "running").length;
         if (running + specs.length > SEQUENCE_LIMITS.maxRunning) throw new Error(`${running} sequences are already running, and at most ${SEQUENCE_LIMITS.maxRunning} can run at once. Wait for one to finish, or cancel one with robotraconteur_cancel_sequence.`);
@@ -511,10 +555,9 @@ export class SequenceRunner
         if (call_watch) this.startCallMonitor(sequences, call_watch);
         if (wait_s > 0)
         {
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            await Promise.race([Promise.all(sequences.map((s) => s.done)), new Promise<void>((resolve) => timer = setTimeout(resolve, Math.min(wait_s, SEQUENCE_LIMITS.maxStatusWait) * 1000))]);
-            clearTimeout(timer);
-            return { sequences: sequences.map((s) => this.report(s, 0, detail)) };
+            const met = await waitFor(sequences, wait_s, until);
+            const reports = { sequences: sequences.map((s) => this.report(s, 0, detail)) };
+            return until === undefined ? reports : { ...reports, until_met: met };
         }
         return {
             sequences: sequences.map((s) => ({
@@ -610,17 +653,13 @@ export class SequenceRunner
     }
 
     /** The state and results of a sequence, from a result index. Waits up to wait_s for it to finish */
-    async status(id: string, from_index = 0, wait_s = 0, detail: ResultDetail = "compact"): Promise<Record<string, unknown>>
+    async status(id: string, from_index = 0, wait_s = 0, detail: ResultDetail = "compact", until?: string): Promise<Record<string, unknown>>
     {
         const sequence = this.get(id);
-        if (sequence.state === "running" && wait_s > 0)
-        {
-            const waited = Math.min(wait_s, SEQUENCE_LIMITS.maxStatusWait);
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            await Promise.race([sequence.done, new Promise<void>((resolve) => timer = setTimeout(resolve, waited * 1000))]);
-            clearTimeout(timer);
-        }
-        return this.report(sequence, from_index, detail);
+        if (until !== undefined) checkUntil(until, [sequence]);
+        const met = wait_s > 0 ? await waitFor([sequence], wait_s, until) : sequence.results.some((r) => r.label === until);
+        const report = this.report(sequence, from_index, detail);
+        return until === undefined ? report : { ...report, until_met: met };
     }
 
     /** Stop several sequences at once, such as all those of one start call, and report each in order */

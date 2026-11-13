@@ -1227,6 +1227,52 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual(cancelled.sequences.map((s: any) => s.state), ["cancelled", "cancelled"]);
     });
 
+    test("until returns as soon as a labelled step has a result", async () =>
+    {
+        const steps = [
+            { action: "wait", seconds: 0.3, label: "first" },
+            { action: "wait_until", service: TEST_SERVICE, name: "ev2", condition: { d1: { $gt: 1000 } }, timeout_s: 0.2, label: "answer", continue_on_error: true },
+            { action: "get_property", name: "color", label: "yes", only_if: { "answer.ok": true } },
+            { action: "wait", seconds: 10, label: "long" }
+        ];
+        const { sequence_id } = await startSeq({ service: "reynard", steps });
+        try
+        {
+            const t0 = Date.now();
+            const first = await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 10, until: "first" });
+            assert.ok(Date.now() - t0 < 1500, "returned when first finished, not after the sequence");
+            assert.equal(first.state, "running");
+            assert.equal(first.until_met, true);
+
+            // Already there: at once. A skipped step counts too
+            const again = Date.now();
+            assert.equal((await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 10, until: "first" })).until_met, true);
+            assert.ok(Date.now() - again < 300);
+            const skipped = await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 10, until: "yes" });
+            assert.equal(skipped.until_met, true);
+            assert.equal(skipped.results.find((r: any) => r.label === "yes").skipped, true);
+
+            // wait_s runs out first
+            const out = await ok(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 0.3, until: "long" });
+            assert.equal(out.until_met, false);
+            assert.equal(out.state, "running");
+            await fails(bridge, "robotraconteur_sequence_status", { sequence_id, wait_s: 1, until: "nothing" }, /no step has the label "nothing"/);
+        }
+        finally
+        {
+            await cancelSeq(sequence_id);
+        }
+
+        const started = await ok(bridge, "robotraconteur_start_sequence", {
+            wait_s: 10, until: "ready",
+            sequences: [{ service: "reynard", steps: [{ action: "wait", seconds: 10 }] }, { service: "reynard", steps: [{ action: "wait", seconds: 0.2, label: "ready" }, { action: "wait", seconds: 10 }] }]
+        });
+        assert.equal(started.until_met, true);
+        assert.deepEqual(started.sequences.map((s: any) => s.state), ["running", "running"]);
+        await ok(bridge, "robotraconteur_cancel_sequence", { sequence_ids: started.sequences.map((s: any) => s.sequence_id) });
+        await fails(bridge, "robotraconteur_start_sequence", { until: "x", sequences: [{ service: "reynard", steps: [{ action: "noop", label: "x" }] }] }, /until needs wait_s/);
+    });
+
     test("a sequence that runs past max_duration_s is stopped", async () =>
     {
         const { sequence_id } = await startSeq({
