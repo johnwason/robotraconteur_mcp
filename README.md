@@ -45,7 +45,7 @@ The computer must be on the same network as the devices. Discovery listens on UD
 | `robotraconteur_read_events` | Return events the service has sent, oldest first, optionally only those of one name, with the server's current time |
 | `robotraconteur_robot_move_joints` | Move a standard robot smoothly to joint positions |
 | `robotraconteur_start_sequence` | Start a timed sequence of steps and return its ID immediately |
-| `robotraconteur_sequence_help` | The detailed rules and examples for sequences, by topic |
+| `robotraconteur_help` | Detailed help by topic, listed in its description: the rules and examples for sequences |
 | `robotraconteur_sequence_status`, `robotraconteur_cancel_sequence` | Follow a sequence and get its results, or stop it |
 
 If the client cancels a tool call, such as when the user presses Esc, a `robotraconteur_robot_move_joints` motion is stopped and the robot halted, and a generator `robotraconteur_call_function` is aborted. A plain function call stops being waited for, but the service finishes it, since a Robot Raconteur call cannot be stopped once sent. `robotraconteur_robot_move_joints` halts the robot whenever the motion does not complete: when it is stopped, fails, or does not finish within `duration_s` plus 30 seconds, which is an error. Only one motion at a time can run on a robot, whichever name it is given by.
@@ -56,7 +56,7 @@ Services are named by `robotraconteur_discover` as `node.service`, and a name st
 
 ### Timed sequences
 
-The tool list is loaded on every turn of a conversation, so `robotraconteur_start_sequence` has a short description of the essentials, and the detailed rules below are given by `robotraconteur_sequence_help`, by topic: actions, timing, waiting, conditions, stopping, on_stop, skipping, events, and examples. The model is told to call it before writing its first sequence. The rules are in `src/sequence_help.ts`, kept in step with this section.
+The tool list is loaded on every turn of a conversation, so `robotraconteur_start_sequence` has a short description of the essentials, and the detailed rules below are given by `robotraconteur_help`, by topic: actions, timing, waiting, conditions, stopping, on_stop, skipping, events, and examples. The model is told to call it before writing its first sequence. The rules are in `src/sequence_help.ts`, kept in step with this section.
 
 Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of `sequences`, usually one, each with its steps, and returns their `sequence_id` values straight away:
 

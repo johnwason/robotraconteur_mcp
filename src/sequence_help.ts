@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The detailed rules for timed sequences, returned by robotraconteur_sequence_help. They are kept out
+// The detailed rules for timed sequences, returned by robotraconteur_help. They are kept out
 // of the start_sequence schema so that the schema stays small, since it is loaded on every turn.
 
 import { SEQUENCE_LIMITS } from "./sequence.js";

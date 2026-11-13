@@ -62,7 +62,7 @@ const call_stop_when = z.strictObject({
 });
 
 const step = z.strictObject({
-    action: z.enum(SEQUENCE_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name. wait takes seconds; wait_until takes name and condition, or watch, and timeout_s; stop_when takes the same without timeout_s; end_stop_when takes target. Help topic: actions"),
+    action: z.enum(SEQUENCE_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name. wait takes seconds; wait_until takes name and condition, or watch, and timeout_s; stop_when takes the same without timeout_s; end_stop_when takes target. robotraconteur_help topic: actions"),
     label: z.string().optional().describe("A name for the step, shown in its results, and used by after, only_if, until, and end_stop_when"),
     service: z.string().optional().describe("The service. Defaults to the sequence's service"),
     object: z.string().optional().describe("Path to a sub object. Leave unset for the root object"),
@@ -74,20 +74,20 @@ const step = z.strictObject({
     joint_position: z.array(z.number()).optional().describe("For robot_move_joints, the target position of every joint"),
     duration_s: z.number().positive().max(100).optional().describe("For robot_move_joints, how long the motion takes in seconds"),
     seconds: z.number().min(0).optional().describe("For wait, how long to wait"),
-    condition: z.record(z.string(), z.unknown()).optional().describe("For wait_until and stop_when, a MongoDB query on the JSON the read tools show, such as { \"joint_position.0\": { \"$gte\": 0.29 } }, { \"value\": { \"$gt\": 0.5 } } for a number, or {} for any event of that name. Enums, 64-bit integers, and allowed operators: help topic conditions"),
-    watch: z.array(watch_entry).min(1).max(10).optional().describe("For wait_until and stop_when, several things to watch in place of name and condition; any one met ends the step unless combine says otherwise. Help topic: waiting"),
-    new_events_only: z.boolean().optional().describe("For wait_until and stop_when, only count events received after the step starts. By default an earlier unread event also counts. Help topic: events"),
-    combine: z.record(z.string(), z.unknown()).optional().describe("With watch, a MongoDB query over the entries by key, each true or false, such as { \"msg\": true, \"arm_ok\": true }. Help topic: waiting"),
+    condition: z.record(z.string(), z.unknown()).optional().describe("For wait_until and stop_when, a MongoDB query on the JSON the read tools show, such as { \"joint_position.0\": { \"$gte\": 0.29 } }, { \"value\": { \"$gt\": 0.5 } } for a number, or {} for any event of that name. Enums, 64-bit integers, and allowed operators: robotraconteur_help topic conditions"),
+    watch: z.array(watch_entry).min(1).max(10).optional().describe("For wait_until and stop_when, several things to watch in place of name and condition; any one met ends the step unless combine says otherwise. robotraconteur_help topic: waiting"),
+    new_events_only: z.boolean().optional().describe("For wait_until and stop_when, only count events received after the step starts. By default an earlier unread event also counts. robotraconteur_help topic: events"),
+    combine: z.record(z.string(), z.unknown()).optional().describe("With watch, a MongoDB query over the entries by key, each true or false, such as { \"msg\": true, \"arm_ok\": true }. robotraconteur_help topic: waiting"),
     check_every_s: z.number().min(SEQUENCE_LIMITS.minEvery).optional().describe("For wait_until and stop_when, how often to read wires and properties. The default is 0.05"),
     clear: z.boolean().optional().describe("For read_events, remove the returned events. The default is true"),
     limit: z.number().int().positive().max(200).optional().describe("For read_events, the most events to return. The default is 50"),
-    at_s: z.number().min(0).optional().describe("Start this many seconds after the sequence started, or with after, after that step ended. The step must start on time or it fails. Help topic: timing"),
+    at_s: z.number().min(0).optional().describe("Start this many seconds after the sequence started, or with after, after that step ended. The step must start on time or it fails. robotraconteur_help topic: timing"),
     target: z.string().optional().describe("For end_stop_when, the label of the stop_when to end, or none to end all"),
-    at: z.string().optional().describe("Start at this absolute ISO 8601 time, from now plus a margin. The step must start on time or it fails. Help topic: timing"),
+    at: z.string().optional().describe("Start at this absolute ISO 8601 time, from now plus a margin. The step must start on time or it fails. robotraconteur_help topic: timing"),
     max_late: z.string().optional().describe("The latest ISO time the step may start; it fails if it comes up later. Defaults to at"),
     max_late_s: z.number().min(0).optional().describe("The latest the step may start, counted as at_s is; it fails if it comes up later. Defaults to at_s"),
-    only_if: z.record(z.string(), z.unknown()).optional().describe("Run the step only if this MongoDB query on earlier labelled steps' { ok, skipped, result, error } holds, such as { \"answer.ok\": true }; otherwise skip it at once, with no wait. Help topic: skipping"),
-    after: z.string().optional().describe("The label of an earlier step; at_s then counts from when it ended. Help topic: timing"),
+    only_if: z.record(z.string(), z.unknown()).optional().describe("Run the step only if this MongoDB query on earlier labelled steps' { ok, skipped, result, error } holds, such as { \"answer.ok\": true }; otherwise skip it at once, with no wait. robotraconteur_help topic: skipping"),
+    after: z.string().optional().describe("The label of an earlier step; at_s then counts from when it ended. robotraconteur_help topic: timing"),
     repeat: z.strictObject({
         count: z.number().int().positive().describe("How many times to run the step"),
         every_s: z.number().min(SEQUENCE_LIMITS.minEvery).describe("Seconds from the start of one run to the start of the next")
@@ -171,26 +171,35 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_start_sequence", {
-        description: `Start one or more timed sequences of steps, and return at once with each one's sequence_id. The steps run in the server without a round trip through the model, so their timing is exact. Before writing your first sequence, call robotraconteur_sequence_help: it has the rules for timing, waiting, conditions, stopping, on_stop, skipping, and events, and examples.
+        description: `Start one or more timed sequences of steps, and return at once with each one's sequence_id. The steps run in the server without a round trip through the model, so their timing is exact. Before writing your first sequence, call robotraconteur_help: it has the rules for timing, waiting, conditions, stopping, on_stop, skipping, and events, and examples.
 Essentials: steps of a sequence run one at a time, in order. Sequences in one call start together on one clock, and every step is checked before any starts, so nothing starts if any step is wrong. A step with at_s or at starts on time or fails. wait_until waits for a condition on a wire, property, or event. stop_when watches in the background and stops its sequence when its condition is met; to stop every sequence of a call on one condition, use the call's stop_when. on_stop steps clean up after any early end and cannot wait. The first step of any sequence to match an event takes it. Follow sequences with robotraconteur_sequence_status. A sequence keeps running if the conversation is interrupted. A cancel arrives a turn late, so put planned stops in max_duration_s or stop_when.`,
         inputSchema: z.object({
             sequences: z.array(z.strictObject({
                 label: z.string().optional().describe("A name for this sequence, shown in its results and the list of sequences. Labels must differ"),
                 service: z.string().optional().describe("The service for this sequence's steps that do not name one"),
                 steps: z.array(step).min(1).max(SEQUENCE_LIMITS.maxSteps).describe("The steps, in order"),
-                on_stop: z.array(z.record(z.string(), z.unknown())).max(20).optional().describe("Steps to run at once if the sequence ends without completing, in the form of steps but without waiting actions or timing fields, such as [{ \"action\": \"call_function\", \"name\": \"halt\" }]. Their only_if can query _sequence, how it ended. Help topic: on_stop"),
+                on_stop: z.array(z.record(z.string(), z.unknown())).max(20).optional().describe("Steps to run at once if the sequence ends without completing, in the form of steps but without waiting actions or timing fields, such as [{ \"action\": \"call_function\", \"name\": \"halt\" }]. Their only_if can query _sequence, how it ended. robotraconteur_help topic: on_stop"),
                 max_duration_s: z.number().positive().max(SEQUENCE_LIMITS.maxDuration).optional().describe(`Stop this sequence after this many seconds. The default is ${SEQUENCE_LIMITS.defaultDuration} and the maximum is ${SEQUENCE_LIMITS.maxDuration}`)
             })).min(1).max(SEQUENCE_LIMITS.maxRunning).describe("The sequences to start, usually one. Several start at the same instant on one clock, such as to move several robots together. Each runs on its own once started, with its own sequence_id, unless stop_together is set"),
-            stop_together: z.boolean().optional().describe("If true, when any of these sequences ends without completing, every other one still running is stopped at once, and runs its own on_stop. Help topic: stopping"),
+            stop_together: z.boolean().optional().describe("If true, when any of these sequences ends without completing, every other one still running is stopped at once, and runs its own on_stop. robotraconteur_help topic: stopping"),
             until: z.string().optional().describe("With wait_s, return as soon as the step with this label has a result, rather than when the sequences end. until_met says whether it did"),
-            stop_when: call_stop_when.optional().describe("A stop_when for the whole call: if its condition is met, every sequence still running is stopped at once and runs its own on_stop. Use it, not one stop_when in each sequence, to stop a whole show on one message or fault. Help topic: stopping"),
+            stop_when: call_stop_when.optional().describe("A stop_when for the whole call: if its condition is met, every sequence still running is stopped at once and runs its own on_stop. Use it, not one stop_when in each sequence, to stop a whole show on one message or fault. robotraconteur_help topic: stopping"),
             detail: z.enum(["compact", "full"]).optional().describe("With wait_s, which results to give for each sequence, as robotraconteur_sequence_status does. The default is compact"),
             wait_s: z.number().min(0).max(SEQUENCE_LIMITS.maxStatusWait).optional().describe("Wait up to this many seconds, counted from the start, for all the sequences to finish, and answer for each as robotraconteur_sequence_status does"),
         })
     }, (a) => respond(() => sequences.start(a.sequences as SequenceSpec[], a.wait_s ?? 0, a.detail ?? "compact", a.stop_when as CallStopWhen | undefined, a.until, a.stop_together ?? false)));
 
-    server.registerTool("robotraconteur_sequence_help", {
-        description: "The rules for robotraconteur_start_sequence: actions, timing, waiting, conditions, stopping, on_stop, skipping, events, and examples. Call it before writing your first sequence, and when a rule is unclear. Without topics, gives them all.",
+    server.registerTool("robotraconteur_help", {
+        description: `Detailed help, by topic. Call it before writing your first sequence with robotraconteur_start_sequence, and when a rule is unclear. Without topics, gives them all. Topics:
+- actions: what each sequence action takes, the fields any step can use, and the limits
+- timing: at_s, after, at, and the max_late and max_late_s deadlines, and starting several things at the same instant
+- waiting: wait_until, with watch to wait for several things, combine, and check_every_s
+- conditions: writing MongoDB queries on wires, properties, and events, special values such as enums and 64-bit integers, and the operators allowed
+- stopping: stop_when, end_stop_when, the call's stop_when, stop_together, max_duration_s, and what a cancel stops
+- on_stop: cleanup steps after an early end, and querying how the sequence ended with _sequence
+- skipping: only_if on the outcomes of earlier labelled steps
+- events: which step takes an event, events received earlier, and new_events_only
+- examples: complete start_sequence calls`,
         inputSchema: z.object({ topics: z.array(z.enum(HELP_TOPICS)).optional().describe("The topics to give. The default is all") }),
         annotations: { readOnlyHint: true }
     }, (a) => ({ content: [{ type: "text" as const, text: sequenceHelp(a.topics) }] }));
