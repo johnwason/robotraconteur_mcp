@@ -506,6 +506,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const status = await finish(started.sequence_id);
         assert.equal(status.state, "completed", JSON.stringify(status));
         assert.equal(status.started, started.started);
+        for (const r of status.results) assert.equal(Date.parse(r.started), Date.parse(status.started) + Math.round(r.started_s * 1000), "a result's started is the sequence's started plus started_s");
         assert.ok(Date.parse(status.ended) >= Date.parse(status.started) + 1500, `ended after the steps: ${status.ended}`);
         await new Promise((resolve) => setTimeout(resolve, 200));
         const later = await ok(bridge, "robotraconteur_sequence_status", { sequence_id: started.sequence_id });
@@ -1052,7 +1053,9 @@ describe("timed sequences", { timeout: 300000 }, () =>
             on_stop: [{ action: "get_property", name: "color", label: "cleanup" }]
         });
         assert.equal(late.state, "failed", JSON.stringify(late));
-        assert.match(late.results.find((r: any) => r.label === "sync").error, /came up at .*, 0\.\d+ s after its latest start time, .*, so it did not run/);
+        const sync = late.results.find((r: any) => r.label === "sync");
+        assert.match(sync.error, /came up at .*, 0\.\d+ s after its latest start time, .*, so it did not run/);
+        assert.ok(sync.late_s > 0.2 && sync.late_s < 0.5, `a missed step gives late_s: ${sync.late_s}`);
         assert.ok(Array.isArray(late.on_stop[0].result), "on_stop ran");
 
         const now = Date.now();

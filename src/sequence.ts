@@ -931,7 +931,8 @@ export class SequenceRunner
                         {
                             const came = new Date();
                             const entry: StepResult = { step: i, iteration, action: step.action, label: step.label, started_s: round(sequence.elapsed), duration_s: 0 };
-                            entry.error = `It came up at ${came.toISOString()}, ${round((came.getTime() - deadline) / 1000)} s after its latest start time, ${new Date(deadline).toISOString()}, so it did not run.`;
+                            entry.late_s = round((came.getTime() - deadline) / 1000);
+                            entry.error = `It came up at ${came.toISOString()}, ${entry.late_s} s after its latest start time, ${new Date(deadline).toISOString()}, so it did not run.`;
                             record(sequence, step, entry);
                             if (!step.continue_on_error) throw new Error(`${describeStep(step, i)} failed: ${entry.error}`);
                             continue;
@@ -1088,8 +1089,14 @@ export class SequenceRunner
         const not_run = sequence.total_runs - sequence.skipped_runs - sequence.results.length;
         if (sequence.state !== "running" && not_run > 0) report.not_run = not_run;
         if (sequence.error) report.error = sequence.error;
-        report.results = results;
-        if (sequence.on_stop_results) report.on_stop = sequence.on_stop_results;
+        // Each result also gives its start as an absolute time, so results can be compared across sequences
+        const absolute = (r: StepResult) =>
+        {
+            const { step, iteration, action, label, ...rest } = r;
+            return { step, iteration, action, label, started: new Date(sequence.started.getTime() + r.started_s * 1000).toISOString(), ...rest };
+        };
+        report.results = results.map(absolute);
+        if (sequence.on_stop_results) report.on_stop = sequence.on_stop_results.map(absolute);
         if (omitted > 0) report.omitted = omitted;
         report.next_index = i;
         report.more_results = i < sequence.results.length;
