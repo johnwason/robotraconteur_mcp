@@ -54,8 +54,8 @@ object Diagnostics
     function void send_message(string message)
 
     ## Send a chat message delay seconds after this call arrives, without waiting for it. Use it to
-    ## have a message arrive while a sequence runs. Called as a step of that sequence, the delay
-    ## shares the sequence's time base.
+    ## have a message arrive while a sequence runs: called from a step at at_s 0, it arrives about
+    ## delay seconds after the sequence starts.
     function void send_message_after(string message, double delay)
 
     ## Cancel the messages scheduled with send_message_after that have not been sent yet

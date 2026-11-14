@@ -195,6 +195,11 @@ test("help gives each page once, ignores case, and notes unknown topics without 
     const page = help("standard_service_types", ["com.robotraconteur.uuid"]);
     assert.match(page, /# Service: `com\.robotraconteur\.uuid`/);
     assert.doesNotMatch(page, /- com\.robotraconteur\.robotics\.robot: /, "topics give only their pages");
+    const robot = help(undefined, ["com.robotraconteur.robotics.robot"]);
+    assert.match(robot, /^Usage: command_mode can only change from halt/, "the robot's usage note comes first");
+    assert.doesNotMatch(robot, /### Imports|### Using Statements/, "the long import lists are shortened");
+    assert.match(robot, /\n- com\.robotraconteur\.geometry: Point, Vector3, Transform, SpatialInertia, Pose, SpatialVelocity, SpatialAcceleration\n/);
+    assert.match(robot, /## Enum: `RobotTypeCode`/, "and the rest of the page is kept");
 });
 
 test("an on_stop step's only_if can query earlier on_stop steps, but not later ones", async () =>
