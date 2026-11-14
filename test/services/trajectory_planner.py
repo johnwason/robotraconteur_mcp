@@ -24,13 +24,16 @@ import com.robotraconteur.robotics.trajectory
 
 using com.robotraconteur.robotics.trajectory.JointTrajectory
 
+## Plans long joint trajectories for the simulated robots, for testing
 object TrajectoryPlanner
-    # The time between waypoints, in seconds
+    ## The time between waypoints, in seconds
     property double waypoint_period [readonly]
-    # The longest trajectory that can be planned, in seconds
+    ## The longest trajectory that can be planned, in seconds
     property double max_duration [readonly]
-    # Plan a trajectory of the given duration in seconds, starting and ending at current_position.
-    # The duration is rounded to a whole number of waypoint periods
+    ## Plan a trajectory of the given duration in seconds, starting and ending at current_position,
+    ## the robot's joint positions in radians. Each joint swings up to 0.3 rad away and back. The
+    ## duration is rounded to a whole number of waypoint periods. Pass the result to the robot's
+    ## execute_trajectory in trajectory command mode
     function JointTrajectory plan_trajectory(double[] current_position, double duration)
 end
 """
