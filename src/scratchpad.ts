@@ -323,7 +323,21 @@ export class Scratchpad
         const entry = this.entries.get(key);
         if (!entry) throw this.missing(key);
         let at: Located = { value: entry.value, info: entry.info, where: key };
-        for (const s of segments) at = at.info ? this.typedChild(at, s) : this.jsonChild(at, s);
+        const child = (from: Located, s: Segment) => from.info ? this.typedChild(from, s) : this.jsonChild(from, s);
+        // A kept result is the value the reply showed under value, or result for a function, so a path
+        // written from the reply, such as _r6.value.joint_position, leaves that out unless it is a real field
+        if (RESULT_KEY.test(key) && (segments[0] === "value" || segments[0] === "result"))
+        {
+            try
+            {
+                child(at, segments[0]);
+            }
+            catch
+            {
+                segments.shift();
+            }
+        }
+        for (const s of segments) at = child(at, s);
         return at;
     }
 

@@ -285,6 +285,12 @@ test("results kept automatically keep the newest, and give way to the model's ow
     // Untyped JSON can be kept too, such as events
     const json = pad.keepResult([{ event: "x" }])!;
     assert.equal(pad.get(json).type, "json");
+    // A path written from the reply that showed the result, under value or result, finds it too
+    const state = pad.keepResult({ joint_position: Float64Array.of(1, 2) }, { type: t("Header"), types, scope: camera });
+    assert.throws(() => pad.get(`${state}.value.joint_position`), /no field "joint_position"/, "value is skipped, then the real path is checked");
+    const kept = pad.keepResult(Float64Array.of(3, 4), { type: t("double[]"), types, scope: camera })!;
+    assert.equal(pad.get(`${kept}.value[1]`).value, 4);
+    assert.equal(pad.get(`${kept}.result[0]`).value, 3);
 
     // They have their own byte limit, and one too large for it is not kept
     const result_bytes = SCRATCHPAD_LIMITS.maxResultBytes;
