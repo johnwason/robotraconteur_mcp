@@ -54,10 +54,15 @@ interface Located
     where: string;
 }
 
-/** maxKeys counts the keys given by the model. maxAuto counts the results stored automatically, which are evicted first */
-export const SCRATCHPAD_LIMITS = { maxKeys: 100, maxBytes: 256 * 1024 * 1024, maxAuto: 8 };
-/** The start of the keys of results stored automatically, which the model cannot use for its own keys */
-export const AUTO_PREFIX = "_auto_";
+/**
+ * maxKeys counts the keys given by the model. maxResults and maxResultBytes limit the results kept
+ * automatically, which are evicted first, oldest first
+ */
+export const SCRATCHPAD_LIMITS = { maxKeys: 100, maxBytes: 256 * 1024 * 1024, maxResults: 20, maxResultBytes: 64 * 1024 * 1024 };
+/** The start of the keys of results kept automatically, such as _r17 */
+export const RESULT_PREFIX = "_r";
+/** A key of a result kept automatically, which the model cannot use for its own keys */
+const RESULT_KEY = /^_r\d+$/;
 const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Results larger than this are returned with large arrays summarized, as the read tools do */
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -119,6 +124,11 @@ function age(e: Entry): number
 }
 
 /** A deep copy, so that changing one entry never changes another that was copied from it */
+export function cloneValue(v: unknown): unknown
+{
+    return clone(v);
+}
+
 function clone(v: unknown): unknown
 {
     if (v === null || typeof v !== "object") return v;
@@ -182,17 +192,24 @@ export class Scratchpad
 
     private refuseAuto(key: string): void
     {
-        if (key.startsWith(AUTO_PREFIX)) throw new Error(`Keys starting with ${AUTO_PREFIX} hold results stored automatically, which later large results replace. To keep one, copy it to a key of your own, with set and value { "$scratchpad": "${key.split(/[.[]/)[0]}" }.`);
+        if (RESULT_KEY.test(key)) throw new Error(`${key} holds a result kept automatically, which later results replace. To keep it, rename it, or copy it, to a key of your own.`);
+    }
+
+    private resultBytes(): number
+    {
+        return this.auto.reduce((n, k) => n + this.entries.get(k)!.bytes, 0);
     }
 
     /**
-     * Keep a result too large to return, under the next automatic key, evicting the oldest automatic
-     * keys to stay within the limits. Returns the key, or undefined if it cannot fit
+     * Keep a result under the next automatic key, such as _r17, evicting the oldest automatic keys to
+     * stay within the limits. info is its type, for a value from a service. Returns the key, or
+     * undefined if it is too large to keep
      */
-    storeAuto(value: unknown, info: ValueType): string | undefined
+    keepResult(value: unknown, info?: ValueType): string | undefined
     {
         const bytes = estimateBytes(value);
-        while (this.auto.length >= SCRATCHPAD_LIMITS.maxAuto) this.evict(this.auto[0]!);
+        if (bytes > SCRATCHPAD_LIMITS.maxResultBytes) return undefined;
+        while (this.auto.length >= SCRATCHPAD_LIMITS.maxResults || (this.auto.length > 0 && this.resultBytes() + bytes > SCRATCHPAD_LIMITS.maxResultBytes)) this.evict(this.auto[0]!);
         try
         {
             this.checkSize(bytes);
@@ -201,7 +218,7 @@ export class Scratchpad
         {
             return undefined;
         }
-        const key = `${AUTO_PREFIX}${this.next_auto++}`;
+        const key = `${RESULT_PREFIX}${this.next_auto++}`;
         this.entries.set(key, { value, info, bytes, time: Date.now() });
         this.auto.push(key);
         return key;
@@ -257,6 +274,34 @@ export class Scratchpad
         return { keys, bytes: this.total(), max_bytes: SCRATCHPAD_LIMITS.maxBytes };
     }
 
+    /** Keep a copy of the value at a path under a key, with its type */
+    copy(path: string, to: string): Record<string, unknown>
+    {
+        const at = this.locate(path);
+        return this.store(to, clone(at.value), at.info);
+    }
+
+    /**
+     * Give a key's value a new key, without copying it. A result kept automatically becomes a key of the
+     * model's own, so newer results do not replace it
+     */
+    rename(from: string, to: string): Record<string, unknown>
+    {
+        const { segments } = parsePath(from);
+        if (segments.length > 0) throw new Error(`rename takes a whole key, not the path "${from}". Use copy to keep part of a value.`);
+        const entry = this.entries.get(from);
+        if (!entry) throw this.missing(from);
+        if (from === to) return this.summary(to);
+        if (!KEY_PATTERN.test(to)) throw new Error(`"${to}" cannot be a scratchpad key. Use letters, digits, and _, not starting with a digit.`);
+        this.refuseAuto(to);
+        const was_result = this.auto.includes(from);
+        if (was_result && !this.entries.has(to) && this.entries.size - this.auto.length >= SCRATCHPAD_LIMITS.maxKeys) throw new Error(`The scratchpad already has ${SCRATCHPAD_LIMITS.maxKeys} keys, its limit. Delete keys that are no longer needed.`);
+        this.evict(from);
+        this.evict(to);
+        this.entries.set(to, entry);
+        return this.summary(to);
+    }
+
     delete(key: string): Record<string, unknown>
     {
         if (!this.entries.has(key)) throw this.missing(key);
@@ -267,7 +312,7 @@ export class Scratchpad
     private missing(key: string): Error
     {
         const keys = [...this.entries.keys()];
-        const evicted = key.startsWith(AUTO_PREFIX) ? " Results stored automatically are replaced by later large results, oldest first." : "";
+        const evicted = RESULT_KEY.test(key) ? ` ${key} was a result kept automatically, which later results have replaced. Keep one you need with rename or copy.` : "";
         return new Error(`There is no scratchpad key "${key}".${evicted} ${keys.length ? `The keys are: ${keys.join(", ")}.` : "The scratchpad is empty."} Store a value with store_result, or with robotraconteur_scratchpad set.`);
     }
 

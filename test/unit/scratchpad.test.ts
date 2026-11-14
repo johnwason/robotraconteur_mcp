@@ -17,7 +17,7 @@ import test from "node:test";
 import { parseServiceDefinition, parseTypeDefinition, VarValue } from "robotraconteur";
 import { TypeContext } from "robotraconteur/internal";
 import { Codec } from "../../src/codec.js";
-import { AUTO_PREFIX, parsePath, Scratchpad, SCRATCHPAD_LIMITS } from "../../src/scratchpad.js";
+import { parsePath, RESULT_PREFIX, Scratchpad, SCRATCHPAD_LIMITS } from "../../src/scratchpad.js";
 
 const camera = parseServiceDefinition(`
 service example.camera
@@ -260,44 +260,83 @@ test("keys and sizes are limited", () =>
     }
 });
 
-test("results stored automatically keep the latest few, and give way to the model's own keys", () =>
+test("results kept automatically keep the newest, and give way to the model's own keys", () =>
 {
     const pad = new Scratchpad();
     const info = { type: t("uint8[]"), types, scope: camera };
-    const keys = Array.from({ length: SCRATCHPAD_LIMITS.maxAuto + 2 }, () => pad.storeAuto(new Uint8Array(10), info));
-    assert.deepEqual(keys.slice(0, 2), [`${AUTO_PREFIX}1`, `${AUTO_PREFIX}2`]);
-    assert.equal(pad.has(`${AUTO_PREFIX}2`), false);
-    assert.equal(pad.has(`${AUTO_PREFIX}3`), true);
-    assert.equal((pad.list().keys as unknown[]).length, SCRATCHPAD_LIMITS.maxAuto);
-    assert.throws(() => pad.get(`${AUTO_PREFIX}1`), /replaced by later large results/);
-
-    // The model cannot write to them, but can copy one to keep it, and delete them
-    assert.throws(() => pad.store(`${AUTO_PREFIX}99`, 1), /hold results stored automatically/);
-    assert.throws(() => pad.set(`${AUTO_PREFIX}3[0]`, 1), /copy it to a key of your own, with set and value \{ "\$scratchpad": "_auto_3" \}/);
-    pad.set("kept", { $scratchpad: `${AUTO_PREFIX}3` });
+    const keys = Array.from({ length: SCRATCHPAD_LIMITS.maxResults + 2 }, () => pad.keepResult(new Uint8Array(10), info));
+    assert.deepEqual(keys.slice(0, 2), [`${RESULT_PREFIX}1`, `${RESULT_PREFIX}2`]);
+    assert.equal(pad.has(`${RESULT_PREFIX}2`), false);
+    assert.equal(pad.has(`${RESULT_PREFIX}3`), true);
+    assert.equal((pad.list().keys as unknown[]).length, SCRATCHPAD_LIMITS.maxResults);
+    assert.throws(() => pad.get(`${RESULT_PREFIX}1`), /_r1 was a result kept automatically, which later results have replaced/);
+    // The model cannot write to them, but can copy one to keep it, and delete them. Keys that only start with _r are its own
+    assert.throws(() => pad.store(`${RESULT_PREFIX}99`, 1), /_r99 holds a result kept automatically/);
+    assert.throws(() => pad.set(`${RESULT_PREFIX}3[0]`, 1), /To keep it, rename it, or copy it, to a key of your own/);
+    pad.store("_rate", 5);
+    pad.set("kept", { $scratchpad: `${RESULT_PREFIX}3` });
     assert.equal(pad.get("kept").type, "uint8[]");
-    pad.delete(`${AUTO_PREFIX}3`);
-    assert.equal(pad.has(`${AUTO_PREFIX}3`), false);
+    pad.delete(`${RESULT_PREFIX}3`);
+    assert.equal(pad.has(`${RESULT_PREFIX}3`), false);
+    // Untyped JSON can be kept too, such as events
+    const json = pad.keepResult([{ event: "x" }])!;
+    assert.equal(pad.get(json).type, "json");
 
-    // When space runs short, the oldest automatic results are evicted first, and named keys never
+    // They have their own byte limit, and one too large for it is not kept
+    const result_bytes = SCRATCHPAD_LIMITS.maxResultBytes;
+    SCRATCHPAD_LIMITS.maxResultBytes = 1000;
+    try
+    {
+        const small = new Scratchpad();
+        const a = small.keepResult(new Uint8Array(400), info)!;
+        const b = small.keepResult(new Uint8Array(400), info)!;
+        const c = small.keepResult(new Uint8Array(400), info)!;
+        assert.equal(small.has(a), false, "the oldest made room");
+        assert.equal(small.has(b) && small.has(c), true);
+        assert.equal(small.keepResult(new Uint8Array(2000), info), undefined);
+    }
+    finally
+    {
+        SCRATCHPAD_LIMITS.maxResultBytes = result_bytes;
+    }
+
+    // When the whole scratchpad runs short, kept results are evicted first, and named keys never
     const max = SCRATCHPAD_LIMITS.maxBytes;
     SCRATCHPAD_LIMITS.maxBytes = 1000;
     try
     {
         const small = new Scratchpad();
         small.store("mine", new Uint8Array(400), info);
-        const a = small.storeAuto(new Uint8Array(400), info)!;
-        const b = small.storeAuto(new Uint8Array(400), info)!;
-        assert.equal(small.has(a), false, "the older automatic result made room");
-        assert.equal(small.has(b), true);
+        const a = small.keepResult(new Uint8Array(400), info)!;
         small.store("also_mine", new Uint8Array(400), info);
-        assert.equal(small.has(b), false);
-        assert.equal(small.has("mine"), true);
-        assert.equal(small.storeAuto(new Uint8Array(2000), info), undefined, "one that cannot fit is not kept");
-        assert.equal(small.has("also_mine"), true);
+        assert.equal(small.has(a), false);
+        assert.equal(small.has("mine") && small.has("also_mine"), true);
+        assert.equal(small.keepResult(new Uint8Array(400), info), undefined, "one that cannot fit is not kept");
     }
     finally
     {
         SCRATCHPAD_LIMITS.maxBytes = max;
     }
+});
+
+test("copy keeps part of a value under a new key, and rename moves a whole key", () =>
+{
+    const pad = withImage();
+    pad.copy("img.header", "hdr");
+    assert.equal(pad.get("hdr").type, "example.camera.Header");
+    pad.set("hdr.seqno", 99);
+    assert.equal(pad.get("img.header.seqno").value, "7", "a copy is separate");
+    const info = { type: t("uint8[]"), types, scope: camera };
+    const r = pad.keepResult(new Uint8Array(4), info)!;
+    pad.rename(r, "mine");
+    assert.equal(pad.has(r), false);
+    assert.equal(pad.get("mine").type, "uint8[]");
+    // No longer a kept result, so newer results do not replace it
+    for (let i = 0; i < SCRATCHPAD_LIMITS.maxResults + 1; i++) pad.keepResult(1);
+    assert.equal(pad.has("mine"), true);
+    pad.rename("mine", "hdr");
+    assert.equal(pad.get("hdr").type, "uint8[]", "rename replaces what the new key held");
+    assert.throws(() => pad.rename("img.header", "x"), /rename takes a whole key/);
+    assert.throws(() => pad.rename("hdr", "_r3"), /_r3 holds a result kept automatically/);
+    assert.throws(() => pad.rename("nope", "x"), /no scratchpad key "nope"/);
 });

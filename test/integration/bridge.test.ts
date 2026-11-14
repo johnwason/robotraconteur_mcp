@@ -130,6 +130,48 @@ async function cancelSeq(sequence_id: string): Promise<any>
     return r.sequences[0];
 }
 
+/** A sequence step that runs a trajectory kept in the scratchpad, to its end */
+function trajectoryStep(service: string, key: string, label?: string): Record<string, unknown>
+{
+    return { action: "call_function", service, name: "execute_trajectory", arguments: [{ $scratchpad: key }], label };
+}
+
+/** Put a robot in trajectory command mode, from halt, so that a trajectory replaces any motion running */
+async function trajectoryMode(service: string): Promise<void>
+{
+    await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "halt" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "trajectory" });
+}
+
+/** Plan a move from where a robot is now to a target with the planner, and keep the plan under key */
+async function planMove(service: string, target: unknown, duration_s: number, key: string): Promise<void>
+{
+    await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state", store_result: `${key}_from` });
+    await ok(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_move", arguments: [{ $scratchpad: `${key}_from.joint_position` }, target, duration_s], store_result: key });
+}
+
+/**
+ * Move a robot as a model now does: a trajectory planned by the planner, run by execute_trajectory and
+ * stepped to its end. Returns the statuses and where the robot ended up
+ */
+async function moveRobot(service: string, target: unknown, duration_s = 0.5): Promise<{ statuses: any[]; final: number[] }>
+{
+    await planMove(service, target, duration_s, "move_plan");
+    await trajectoryMode(service);
+    const { generator } = await ok(bridge, "robotraconteur_call_function", { service, name: "execute_trajectory", arguments: [{ $scratchpad: "move_plan" }] });
+    const statuses: any[] = [];
+    for (;;)
+    {
+        const r = await ok(bridge, "robotraconteur_generator", { generator, action: "next" });
+        if (r.done) break;
+        statuses.push(r.value);
+    }
+    // robot_state can be a tick behind the complete status
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { statuses, final: (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position };
+}
+
 async function discover(client: Client, wanted: string[]): Promise<any[]>
 {
     const deadline = Date.now() + 45000;
@@ -174,18 +216,18 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("offers a fixed list of tools", async () =>
     {
         const { tools } = await bridge.listTools();
-        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_generator", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_scratchpad", "robotraconteur_start_sequence", "robotraconteur_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
+        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_generator", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_scratchpad", "robotraconteur_start_sequence", "robotraconteur_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
         for (const t of tools) assert.ok((t.description?.length ?? 0) > 20, t.name);
         // The tool list is loaded on every turn, so the detailed sequence rules are in robotraconteur_help
         const size = (name: string) => JSON.stringify(tools.find((t) => t.name === name)).length;
         assert.ok(size("robotraconteur_start_sequence") < 13000, `start_sequence is ${size("robotraconteur_start_sequence")} characters`);
-        // 28000 before the scratchpad, which adds about 1.7 K, and 29700 before robotraconteur_generator, about 0.35 K net
-        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 30100, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
+        // 28000 before the scratchpad and robotraconteur_generator, and back to about it with robot_move_joints removed
+        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 28600, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
         // The scratchpad adds little to the list: its tool, and a short store_result on six schemas
         const store_result = tools.reduce((n, t) => n + JSON.stringify(t).split('"store_result"').length - 1, 0);
         const added = size("robotraconteur_scratchpad") + tools.reduce((n, t) => n + (JSON.stringify(t).match(/"store_result":\{[^}]*\}/g) ?? []).join("").length, 0);
         assert.equal(store_result, 6);
-        assert.ok(added < 1600, `the scratchpad adds ${added} characters`);
+        assert.ok(added < 1800, `the scratchpad adds ${added} characters`);
     });
 
     test("sequence help gives the rules by topic", async () =>
@@ -290,7 +332,6 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.equal(first.not_updating, undefined, "one read cannot tell");
         // Properties still answer, as with a driver whose loop died
         assert.equal((await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" })).value.name, "halt");
-        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0.1, 0, 0, 0, 0, 0], duration_s: 1 }, /robot_state has not updated for 1 second: its seqno stayed at \d+\. The robot's driver may have stopped, so the robot was not moved\./);
 
         // A stop_when on a fault would never fire on a frozen state, so the sequence stops instead
         const report = await startSeq({ service, wait_s: 15, steps: [
@@ -371,22 +412,6 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_get_property", { service, name: "robot_state" }, /is a wire, not a property\. Use robotraconteur_read_wire or robotraconteur_write_wire/);
         await fails(bridge, "robotraconteur_read_wire", { service, name: "tool_changed" }, /is an event, not a wire\. Use robotraconteur_read_events/);
         await fails(bridge, "robotraconteur_read_wire", { service, name: "robot_state_sensor_data" }, /is a pipe, not a wire\. There is no tool for using a pipe/);
-    });
-
-    test("a second motion cannot interrupt one that is running", async () =>
-    {
-        const service = "robot_a.robot";
-        const first = ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0.1, 0, 0, 0, 0, 0], duration_s: 2 });
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 }, /already moving/);
-        assert.equal((await first).completed, true);
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
-    });
-
-    test("a very long motion is refused rather than exhausting memory", async () =>
-    {
-        await fails(bridge, "robotraconteur_robot_move_joints", { service: "robot_a.robot", joint_position: [0, 0, 0, 0, 0, 0], duration_s: 100000 }, /duration_s/);
-        await ok(bridge, "robotraconteur_discover");
     });
 
     test("a member that can hold any object can be described", async () =>
@@ -504,7 +529,7 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         await ok(bridge, "robotraconteur_set_property", { service: "reynard", name: "color", value: [0.929, 0.49, 0.192] });
     });
 
-    test("moves a standard robot with one call", async () =>
+    test("moves a standard robot with a planned trajectory", async () =>
     {
         const service = "robot_a.robot";
         const { value } = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" });
@@ -512,42 +537,19 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.deepEqual(value.controller_state.name !== undefined, true);
 
         const target = [0.2, -0.1, 0.1, 0, 0.1, 0.3];
-        const moved = await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: target, duration_s: 1 });
-        assert.equal(moved.completed, true, JSON.stringify(moved));
-        moved.final_position.forEach((x: number, i: number) => assert.ok(Math.abs(x - target[i]!) < 1e-3, `joint ${i}: ${x}`));
+        const moved = await moveRobot(service, target, 1);
+        assert.equal(moved.statuses[moved.statuses.length - 1].action_status.name, "complete", JSON.stringify(moved.statuses));
+        moved.final.forEach((x: number, i: number) => assert.ok(Math.abs(x - target[i]!) < 1e-3, `joint ${i}: ${x}`));
+        await moveRobot(service, [0, 0, 0, 0, 0, 0]);
 
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
-        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0], duration_s: 1 }, /has 6 joints but 2/);
-        assert.equal(moved.count, undefined, "the waypoint count is not reported");
-        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 2.5, 0, 0, 0, 0], duration_s: 1 }, /joint_2 \(joint 1\) has a target of 2\.5, outside its limits of -1\.745 to 2\.269/);
-        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ service, steps: [{ action: "robot_move_joints", joint_position: [0, 0, 0, 0, 0, 7], duration_s: 1 }] }] }, /joint_6 \(joint 5\) has a target of 7, outside its limits.*The sequence was not started\. See robotraconteur_help topic actions\./);
-        await fails(bridge, "robotraconteur_robot_move_joints", { service: "reynard", joint_position: [0], duration_s: 1 }, /needs a standard robot, com\.robotraconteur\.robotics\.robot\.Robot, .* but this is experimental\.reynard_the_robot\.Reynard/);
+        // The planner refuses a target it cannot reach, before anything moves
+        await fails(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_move", arguments: [[0, 0, 0, 0, 0, 0], [0, 0], 1] }, /target_position must have 6 joints, not 2/);
+        await fails(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_move", arguments: [[0, 0, 0, 0, 0, 0], [0, 2.5, 0, 0, 0, 0], 1] }, /target_position joint 1 \(joint_2\) is 2\.5, outside its limits of -1\.745 to 2\.269/);
+        await fails(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_move", arguments: [[0, 0, 0, 0, 0, 0], [2, 0, 0, 0, 0, 0], 0.2] }, /joint 0 \(joint_1\) would move at .* rad\/s, over its limit of .*\. Use a duration of at least/);
 
         // The other robot was not moved
         const other = await ok(bridge, "robotraconteur_read_wire", { service: "robot_b.robot", name: "robot_state" });
         assert.deepEqual(other.value.joint_position, [0, 0, 0, 0, 0, 0]);
-    });
-
-    test("a cancelled client call stops the robot and halts it", async () =>
-    {
-        const service = "robot_a.robot";
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
-        const abort = new AbortController();
-        const moving = bridge.callTool({ name: "robotraconteur_robot_move_joints", arguments: { service, joint_position: [0.5, 0, 0, 0, 0, 0], duration_s: 4 } }, { signal: abort.signal, timeout: 30000 });
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        abort.abort();
-        await assert.rejects(moving);
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        const mode = await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" });
-        assert.equal(mode.value.name, "halt", "the robot was halted");
-        const first = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        const later = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
-        assert.ok(first > 0 && first < 0.5, `stopped partway: ${first}`);
-        assert.equal(later, first, "and stays stopped");
-        // A sequence step with the wrong joint count fails before anything runs
-        await failsStart({ steps: [{ action: "call_function", service: "reynard", name: "say", arguments: ["not said"] }, { action: "robot_move_joints", service, joint_position: [0, 0], duration_s: 1 }] }, /steps\[1\].*has 6 joints but 2/);
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
     });
 
     test("uses enums by name and reports them by name", async () =>
@@ -623,7 +625,7 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.ok(stopped[0] > 0.02 && stopped[0] < 0.28, `stopped partway, at ${stopped[0]}`);
         await new Promise((resolve) => setTimeout(resolve, 500));
         assert.deepEqual((await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position, stopped, "and stays stopped");
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 0.5);
     });
 
     test("reads every part of Core's test service", async () =>
@@ -703,15 +705,43 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.equal(r.value.length, 2621440);
         assert.ok(JSON.stringify(r).length < 64 * 1024);
         // The full value is kept, so that it is not lost
-        assert.match(r.auto_stored, /^_auto_\d+$/);
-        assert.match(r.note, new RegExp(`kept in robotraconteur_scratchpad as ${r.auto_stored}`));
-        const part = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: `${r.auto_stored}[2621439]` });
+        assert.match(r.kept_as, /^_r\d+$/);
+        assert.match(r.note, new RegExp(`summarized\\. The full value is kept as ${r.kept_as}\\.`));
+        const part = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: `${r.kept_as}[2621439]` });
         assert.equal(typeof part.value, "number");
-        // A sequence step does not keep large results by itself
-        const seq = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 30, detail: "full", sequences: [{ steps: [{ action: "get_property", service: TEST_SERVICE, name: "i32_huge", label: "big" }] }] });
-        assert.equal(seq.sequences[0].state, "completed");
-        const keys = (await ok(bridge, "robotraconteur_scratchpad", { action: "list" })).keys.map((k: { key: string }) => k.key);
-        assert.equal(keys.filter((k: string) => k.startsWith("_auto_")).length, 1, keys.join());
+        // A small result is kept too
+        const small = await ok(bridge, "robotraconteur_get_property", { service: "reynard", name: "color" });
+        assert.match(small.kept_as, /^_r\d+$/);
+        assert.notEqual(small.kept_as, r.kept_as);
+        assert.deepEqual((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: small.kept_as })).value, small.value);
+        // copy and rename keep one under a key of the model's own. A rename takes it out of the results replaced by newer ones
+        await ok(bridge, "robotraconteur_scratchpad", { action: "copy", path: `${r.kept_as}[5]`, to: "one_value" });
+        assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "one_value" })).type, "int32");
+        await ok(bridge, "robotraconteur_scratchpad", { action: "rename", path: r.kept_as, to: "huge_kept" });
+        assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "huge_kept[2621439]" })).value, part.value);
+        await fails(bridge, "robotraconteur_scratchpad", { action: "get", path: r.kept_as }, /no scratchpad key/);
+        await fails(bridge, "robotraconteur_scratchpad", { action: "rename", path: "huge_kept", to: "_r5" }, /_r5 holds a result kept automatically/);
+        await fails(bridge, "robotraconteur_scratchpad", { action: "copy", path: "huge_kept" }, /copy needs to/);
+        for (const k of ["one_value", "huge_kept"]) await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: k });
+
+        // A sequence keeps the result of its last step that returned data when it ends, not of later
+        // steps that return none, nor of on_stop
+        const seq = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 30, detail: "full", sequences: [{
+            steps: [
+                { action: "get_property", service: TEST_SERVICE, name: "i32_huge" },
+                { action: "read_wire", service: "reynard", name: "state", label: "last_read" },
+                { action: "wait", seconds: 0.1 },
+                { action: "wait_until", service: "reynard", name: "state", condition: { "robot_position.0": { $gt: 1000 } }, timeout_s: 0.2 }
+            ],
+            on_stop: [{ action: "get_property", service: "reynard", name: "color" }]
+        }] });
+        assert.equal(seq.sequences[0].state, "failed");
+        const kept = seq.sequences[0].kept_as;
+        assert.match(kept, /^_r\d+$/);
+        const state = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: kept });
+        assert.equal(state.type, "experimental.reynard_the_robot.ReynardState");
+        // The same in a status call
+        assert.equal((await ok(bridge, "robotraconteur_sequence_status", { sequence_id: seq.sequences[0].sequence_id })).kept_as, kept);
     });
 
     test("mistakes are explained so that the model can correct them", async () =>
@@ -864,7 +894,6 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await failsStart({ steps: [{ action: "set_property", service: "reynard", name: "color" }] }, /set_property action needs value/);
         await failsStart({ steps: [{ action: "set_property", service: "reynard", name: "color", value: "red" }] }, /steps\[0\]/);
         await failsStart({ steps: [{ action: "wait" }] }, /needs seconds/);
-        await failsStart({ steps: [{ action: "robot_move_joints", service: "reynard", joint_position: [0], duration_s: 1 }] }, /needs a standard robot/);
         await failsStart({ steps: [{ action: "call_function", service: "reynard", name: "say", args: ["x"] }] }, /args/);
         await failsStart({ steps: [{ action: "read_wire", service: "reynard", name: "state", repeat: { count: 1000, every_s: 1 } }] }, /would start at 999 seconds, but runs must start before max_duration_s, 60\./);
         await failsStart({ steps: [say], max_duration_s: 10000 }, /max_duration_s/);
@@ -906,19 +935,22 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("cancelling stops a robot partway and halts it", async () =>
     {
         const service = "robot_b.robot";
-        const target = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
+        await planMove(service, [0.5, 0.5, 0.5, 0.5, 0.5, 0.5], 4, "cancel_plan");
+        await trajectoryMode(service);
+        // A cancelled trajectory is aborted, and on_stop halts the robot
         const { sequence_id } = await startSeq({
-            steps: [{ action: "robot_move_joints", service, joint_position: target, duration_s: 4 }, { action: "call_function", service: "reynard", name: "say", arguments: ["Not reached"] }]
+            steps: [trajectoryStep(service, "cancel_plan"), { action: "call_function", service: "reynard", name: "say", arguments: ["Not reached"] }],
+            on_stop: [{ action: "set_property", service, name: "command_mode", value: "halt" }]
         });
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         const running = await ok(bridge, "robotraconteur_sequence_status", { sequence_id });
         assert.equal(running.state, "running");
-        assert.equal(running.current_step.action, "robot_move_joints");
+        assert.equal(running.current_step.action, "call_function");
 
         const cancelled = await cancelSeq(sequence_id);
         assert.equal(cancelled.state, "cancelled");
         assert.match(cancelled.results[0].error, /cancelled/);
-        assert.match(cancelled.stopped, /^During step 0 \(robot_move_joints\), which was stopped/);
+        assert.match(cancelled.stopped, /^During step 0 \(call_function\), which was stopped/);
         assert.equal(cancelled.not_run, 1);
         assert.equal((await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" })).value.name, "halt");
 
@@ -931,7 +963,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         assert.deepEqual((await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position, stopped);
 
         // The robot is free for the next motion
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 1);
         await fails(bridge, "robotraconteur_cancel_sequence", { sequence_ids: ["seq-0"] }, /Unknown sequence "seq-0"/);
         const again = await cancelSeq(sequence_id);
         assert.match(again.cancel, /already been cancelled before this cancel, so nothing was cancelled/);
@@ -945,13 +977,15 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("two sequences run side by side, sampling a robot while it moves", async () =>
     {
         const service = "robot_a.robot";
-        const move = await startSeq({ steps: [{ action: "robot_move_joints", service, joint_position: [0.4, 0, 0, 0, 0, 0], duration_s: 2 }] });
+        await planMove(service, [0.4, 0, 0, 0, 0, 0], 2, "side_plan");
+        await trajectoryMode(service);
+        const move = await startSeq({ steps: [trajectoryStep(service, "side_plan")] });
         const sample = await startSeq({ steps: [{ action: "read_wire", service, name: "robot_state", at_s: 0.5, repeat: { count: 4, every_s: 0.4 } }] });
         const samples = (await finish(sample.sequence_id)).results.map((r: any) => r.result.value.joint_position[0]);
         assert.equal((await finish(move.sequence_id)).state, "completed");
         for (let i = 1; i < samples.length; i++) assert.ok(samples[i] > samples[i - 1], `moving during the samples: ${samples.join(", ")}`);
         assert.ok(samples[samples.length - 1] < 0.4, `sampled before arriving: ${samples.join(", ")}`);
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 1);
     });
 
     test("cancelling aborts a generator called by a step", async () =>
@@ -986,7 +1020,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await new Promise((resolve) => setTimeout(resolve, 500));
         assert.deepEqual((await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position, stopped);
 
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 1);
     });
 
     test("a cancel between steps says so, and the status shows the step being waited for", async () =>
@@ -1279,12 +1313,15 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("stop_when halts a robot that passes a limit", async () =>
     {
         const service = "robot_b.robot";
+        await planMove(service, [0.5, 0, 0, 0, 0, 0], 4, "limit_plan");
+        await trajectoryMode(service);
         const { sequence_id } = await startSeq({
             service,
             steps: [
                 { action: "stop_when", name: "robot_state", condition: { "joint_position.0": { $gte: 0.2 } }, label: "limit", check_every_s: 0.02 },
-                { action: "robot_move_joints", joint_position: [0.5, 0, 0, 0, 0, 0], duration_s: 4 }
-            ]
+                trajectoryStep(service, "limit_plan")
+            ],
+            on_stop: [{ action: "set_property", name: "command_mode", value: "halt" }]
         });
         const status = await finish(sequence_id);
         assert.equal(status.state, "stopped", JSON.stringify(status));
@@ -1293,7 +1330,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await new Promise((resolve) => setTimeout(resolve, 300));
         const stopped = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
         assert.ok(stopped >= 0.2 && stopped < 0.3, `halted just past the limit: ${stopped}`);
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 1);
     });
 
     test("at starts steps of separate sequences at the same absolute time", async () =>
@@ -1589,7 +1626,9 @@ describe("timed sequences", { timeout: 300000 }, () =>
     test("wait_until waits for a robot to pass a position during a motion", async () =>
     {
         const service = "robot_a.robot";
-        const move = await startSeq({ steps: [{ action: "robot_move_joints", service, joint_position: [0.4, 0, 0, 0, 0, 0], duration_s: 2 }] });
+        await planMove(service, [0.4, 0, 0, 0, 0, 0], 2, "pass_plan");
+        await trajectoryMode(service);
+        const move = await startSeq({ steps: [trajectoryStep(service, "pass_plan")] });
         const watch = await startSeq({
             steps: [{
                 action: "wait_until", service, name: "robot_state", timeout_s: 10,
@@ -1604,7 +1643,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         // The motion eases in and out, so it passes 0.3 of 0.4 two thirds of the way through
         assert.ok(waited.waited_s > 0.8 && waited.waited_s < 1.9, `waited ${waited.waited_s} s`);
         assert.equal((await finish(move.sequence_id)).state, "completed");
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 1 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 1);
     });
 
     test("wait_until conditions use $expr, query other values as value, and time out with the last value", async () =>
@@ -1923,7 +1962,7 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest", arguments: [{ $scratchpad: "nothing" }] }, /no scratchpad key "nothing"/);
         await fails(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "make_frame", arguments: [4, 1], store_result: "a.b" }, /store_result must be a key/);
         await ok(bridge, "robotraconteur_scratchpad", { action: "set", path: "words", value: "not numbers" });
-        await fails(bridge, "robotraconteur_robot_move_joints", { service: "robot_a.robot", joint_position: { $scratchpad: "words" }, duration_s: 1 }, /joint_position\[0\]: expected a double but got "not numbers" \(from scratchpad words\)/);
+        await fails(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_move", arguments: [{ $scratchpad: "words" }, [0, 0, 0, 0, 0, 0], 1] }, /current_position\[0\]: expected a double but got "not numbers" \(from scratchpad words\)/);
         await fails(bridge, "robotraconteur_scratchpad", { action: "get" }, /get needs path/);
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "words" });
     });
@@ -1942,21 +1981,21 @@ describe("the scratchpad", { timeout: 300000 }, () =>
     test("a pose read from the robot is moved back to", async () =>
     {
         const service = "robot_a.robot";
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0.1, 0.1, 0.1, 0, 0, 0], duration_s: 0.5 });
+        await moveRobot(service, [0.1, 0.1, 0.1, 0, 0, 0], 0.5);
         const read = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state", store_result: "home" });
         assert.equal(read.value, undefined);
         assert.ok(read.read_at);
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
-        const moved = await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: { $scratchpad: "home.joint_position" }, duration_s: 0.5 });
-        moved.final_position.forEach((x: number, i: number) => assert.ok(Math.abs(x - [0.1, 0.1, 0.1, 0, 0, 0][i]!) < 1e-3, `joint ${i}: ${x}`));
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 0.5);
+        const moved = await moveRobot(service, { $scratchpad: "home.joint_position" }, 0.5);
+        moved.final.forEach((x: number, i: number) => assert.ok(Math.abs(x - [0.1, 0.1, 0.1, 0, 0, 0][i]!) < 1e-3, `joint ${i}: ${x}`));
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 0.5);
     });
 
     test("a long trajectory planned from the robot's position is executed from the scratchpad", { timeout: 90000 }, async () =>
     {
         const service = "robot_b.robot";
         const start = [0.2, -0.1, 0.3, 0, 0.4, 0];
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: start, duration_s: 0.5 });
+        await moveRobot(service, start, 0.5);
         await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state", store_result: "here" });
         // 20 s with waypoints every 50 ms, too large to return to the model
         const planned = await ok(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_trajectory", arguments: [{ $scratchpad: "here.joint_position" }, 20], store_result: "traj" });
@@ -1998,7 +2037,7 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         arrived.forEach((x: number, i: number) => assert.ok(Math.abs(x - start[i]!) < 1e-3, `joint ${i}: ${x}`));
 
         await fails(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_trajectory", arguments: [[0, 0, 0], 5] }, /must have 6 joints/);
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 0.5);
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "here" });
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "traj" });
     });
@@ -2008,9 +2047,15 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         const service = "robot_a.robot";
         const waypoints = [1, 2, 3].map((i) => [0, 1, 2, 3, 4, 5].map((j) => i * 0.05 * (j % 2 === 0 ? 1 : -1)));
         const expected = (await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest_waypoints", arguments: [waypoints] })).result;
+        await trajectoryMode(service);
+        // Each leg is planned in the sequence from where the robot is when it comes up
         const r = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 30, detail: "full", sequences: [{ steps: [
             { action: "call_function", service: ROUNDTRIP, name: "make_waypoints", arguments: [3, 6], store_result: "wp", label: "made" },
-            ...[0, 1, 2].map((i) => ({ action: "robot_move_joints", service, joint_position: { $scratchpad: `wp[${i}]` }, duration_s: 0.3 })),
+            ...[0, 1, 2].flatMap((i) => [
+                { action: "read_wire", service, name: "robot_state", store_result: "leg_from" },
+                { action: "call_function", service: PLANNER, name: "plan_move", arguments: [{ $scratchpad: "leg_from.joint_position" }, { $scratchpad: `wp[${i}]` }, 0.5], store_result: "leg" },
+                trajectoryStep(service, "leg")
+            ]),
             { action: "call_function", service: ROUNDTRIP, name: "digest_waypoints", arguments: [{ $scratchpad: "wp" }], label: "digest" },
             { action: "call_function", service: ROUNDTRIP, name: "stream_waypoints", arguments: [2, 6], store_result: "streamed", label: "streamed" }
         ] }] });
@@ -2027,7 +2072,7 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         last.value.joint_position.forEach((x: number, i: number) => assert.ok(Math.abs(x - waypoints[2]![i]!) < 1e-3, `joint ${i}: ${x}`));
         const streamed = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "streamed[1]" });
         assert.deepEqual(streamed.value, waypoints[1]);
-        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        await moveRobot(service, [0, 0, 0, 0, 0, 0], 0.5);
     });
 
     test("a sequence that uses a key nothing stores is refused before it starts", async () =>
@@ -2036,7 +2081,7 @@ describe("the scratchpad", { timeout: 300000 }, () =>
             { action: "call_function", service: ROUNDTRIP, name: "digest", arguments: [{ $scratchpad: "never_stored" }] }
         ] }] }, /there is no scratchpad key "never_stored", and no step stores it.*The sequence was not started\. See robotraconteur_help topic scratchpad\./);
         await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ steps: [
-            { action: "robot_move_joints", service: "robot_a.robot", joint_position: { $scratchpad: "never_stored" }, duration_s: 1 }
+            trajectoryStep("robot_a.robot", "never_stored")
         ] }] }, /never_stored/);
         await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ steps: [
             { action: "set_property", service: ROUNDTRIP, name: "frame", value: { width: 1 }, store_result: "x" }

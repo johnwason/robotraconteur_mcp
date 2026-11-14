@@ -18,6 +18,7 @@ import { Codec, typeName } from "./codec.js";
 import { describeObject } from "./describe.js";
 import type { ReceivedEvent, ServiceRegistry } from "./registry.js";
 import { parsePath, Scratchpad } from "./scratchpad.js";
+import type { ValueType } from "./scratchpad.js";
 
 /** Tool results larger than this are sent with their large arrays summarized */
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -38,9 +39,6 @@ interface OpenGenerator
     /** Whether a next is waiting for the service, since a generator takes one request at a time */
     busy: boolean;
 }
-const COMMAND_MODE_HALT = 0;
-const COMMAND_MODE_TRAJECTORY = 2;
-const WAYPOINT_SPACING_S = 0.05;
 
 const TOOL_FOR_KIND: Record<string, string> = {
     property: "Use robotraconteur_get_property or robotraconteur_set_property.",
@@ -69,8 +67,6 @@ function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinit
  * number of a standard state, such as robot_state, is the only sign that a device has stopped sending
  */
 export const NOT_UPDATING_S = 5;
-/** How long robot_move_joints waits for robot_state to update before refusing to move */
-const ROBOT_STATE_CHECK_S = 1;
 
 /**
  * The sequence number of a standard state structure, which advances with every new value: seqno,
@@ -83,38 +79,6 @@ function seqnoOf(value: unknown): string | undefined
     const header = v.data_header as Record<string, unknown> | null | undefined;
     const seqno = v.seqno ?? v.device_seqno ?? header?.seqno;
     return typeof seqno === "bigint" || typeof seqno === "number" ? String(seqno) : undefined;
-}
-
-/** The parts of a standard robot's robot_info that robot_move_joints uses */
-interface RobotInfo
-{
-    joint_info: { joint_identifier?: { name?: string } | null; joint_limits?: { lower?: number; upper?: number } | null }[];
-}
-
-/**
- * Refuse a target with the wrong joint count, or outside a joint's limits, before anything moves. A
- * joint whose limits are not given, both zero, or not lower below upper, is not checked
- */
-function checkJointTarget(info: RobotInfo, target: number[]): void
-{
-    if (info.joint_info.length !== target.length) throw new Error(`The robot has ${info.joint_info.length} joints but ${target.length} positions were given.`);
-    for (const [i, j] of info.joint_info.entries())
-    {
-        const { lower, upper } = j.joint_limits ?? {};
-        if (typeof lower !== "number" || typeof upper !== "number" || !(lower < upper)) continue;
-        const value = target[i]!;
-        if (value >= lower && value <= upper) continue;
-        const name = j.joint_identifier?.name ? `${j.joint_identifier.name} (joint ${i})` : `Joint ${i}`;
-        throw new Error(`${name} has a target of ${value}, outside its limits of ${lower} to ${upper} from robot_info.joint_info. Give a target within the limits.`);
-    }
-}
-
-/** robot_move_joints needs a standard robot. Says which type is needed and what the service is instead */
-function robotMember(stub: ServiceStub): MemberDefinition
-{
-    const m = stub.context.findMember(stub.objectType, "execute_trajectory");
-    if (m && m.kind === "function") return m;
-    throw new Error(`robot_move_joints needs a standard robot, com.robotraconteur.robotics.robot.Robot, with an execute_trajectory function, but this is ${stub.objectType}. Use robotraconteur_describe to see how to move it.`);
 }
 
 /**
@@ -152,6 +116,24 @@ function withoutGenerator(t: TypeDefinition): TypeDefinition
     return item;
 }
 
+/**
+ * The value a result was made from, as received, with its type, so that a sequence can keep its last
+ * result in the scratchpad unchanged. A symbol, so that it is never part of the JSON returned
+ */
+export const NATIVE = Symbol("native");
+export interface NativeValue
+{
+    value: unknown;
+    info?: ValueType;
+}
+
+/** Attach the value a result was made from, without making it part of the result */
+function withNative<T extends object>(result: T, native: NativeValue): T
+{
+    Object.defineProperty(result, NATIVE, { value: native, enumerable: false, configurable: true });
+    return result;
+}
+
 function sleep(ms: number): Promise<void>
 {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -160,7 +142,6 @@ function sleep(ms: number): Promise<void>
 /** What the tools do, separate from the MCP protocol so that it can be tested directly */
 export class BridgeTools
 {
-    private moving = new Set<string>();
     private generators = new Map<string, OpenGenerator>();
     /** Generators that have ended, oldest first, with how */
     private ended = new Map<string, string>();
@@ -183,15 +164,23 @@ export class BridgeTools
      * A value as JSON, with large arrays summarized if it is too big to return. With auto, the full value
      * of a summarized one is kept in the scratchpad, so that it is not lost
      */
-    private output(stub: ServiceStub, value: unknown, t: TypeDefinition, auto: boolean): { value: unknown; auto_stored?: string; note?: string }
+    private output(stub: ServiceStub, value: unknown, t: TypeDefinition, direct: boolean): { value: unknown; kept_as?: string; note?: string }
     {
         const codec = new Codec(stub.context.types);
         const full = codec.toJson(value, t, scope(stub));
-        if (JSON.stringify(full).length <= MAX_RESULT_BYTES) return { value: full };
-        const summary = codec.toJson(value, t, scope(stub), SUMMARIZED);
-        const key = auto ? this.scratchpad.storeAuto(value, { type: t, types: stub.context.types, scope: scope(stub) }) : undefined;
-        if (key === undefined) return { value: summary };
-        return { value: summary, auto_stored: key, note: `Too large to return in full, so large arrays are summarized. The full value is kept in robotraconteur_scratchpad as ${key}, which later large results may replace. To keep it, copy it to a key of your own with set.` };
+        const fits = JSON.stringify(full).length <= MAX_RESULT_BYTES;
+        const shown = fits ? full : codec.toJson(value, t, scope(stub), SUMMARIZED);
+        // A direct result is kept, so that it can be used later without having been stored by name
+        const key = direct ? this.scratchpad.keepResult(value, this.info(stub, t)) : undefined;
+        const out: { value: unknown; kept_as?: string; note?: string } = { value: shown };
+        if (key !== undefined) out.kept_as = key;
+        if (!fits) out.note = `Too large to return in full, so large arrays are summarized.${key ? ` The full value is kept as ${key}.` : ""}`;
+        return withNative(out, { value, info: this.info(stub, t) });
+    }
+
+    private info(stub: ServiceStub, type: TypeDefinition): ValueType
+    {
+        return { type, types: stub.context.types, scope: scope(stub) };
     }
 
     /** Keep a value from a service in the scratchpad, with its type */
@@ -206,13 +195,6 @@ export class BridgeTools
         if (key === undefined) return;
         const { segments } = parsePath(key);
         if (segments.length > 0) throw new Error(`store_result must be a key, such as img, not the path "${key}".`);
-    }
-
-    /** The target of robot_move_joints, given as numbers or as a scratchpad marker */
-    private jointTarget(stub: ServiceStub, given: unknown, pending?: ReadonlySet<string>): number[] | undefined
-    {
-        const v = this.codec(stub, pending).fromJson(given, parseTypeDefinition("double[]"), scope(stub), "joint_position") as Float64Array | undefined;
-        return v === undefined ? undefined : Array.from(v);
     }
 
     /** Report what is known now. Searching happens in the background and never delays the answer */
@@ -245,15 +227,15 @@ export class BridgeTools
         return describeObject(await this.registry.resolve(service, object), member_name);
     }
 
-    /** auto keeps a result too large to return in the scratchpad, for a direct call rather than a sequence step */
-    async getProperty(service: string, object: string | undefined, name: string, store_result?: string, auto = false): Promise<Record<string, unknown>>
+    /** direct is a call from the model rather than a sequence step, whose result is kept as kept_as */
+    async getProperty(service: string, object: string | undefined, name: string, store_result?: string, direct = false): Promise<Record<string, unknown>>
     {
         this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["property"]);
         const value = await stub.getProperty(name);
-        if (store_result !== undefined) return { stored: this.keep(stub, store_result, value, m.type!) };
-        return this.output(stub, value, m.type!, auto);
+        if (store_result !== undefined) return withNative({ stored: this.keep(stub, store_result, value, m.type!) }, { value, info: this.info(stub, m.type!) });
+        return this.output(stub, value, m.type!, direct);
     }
 
     async setProperty(service: string, object: string | undefined, name: string, value: unknown): Promise<Record<string, unknown>>
@@ -266,10 +248,9 @@ export class BridgeTools
 
     /**
      * Check that a member can be used as a tool would use it, converting the value or arguments given
-     * for it, without using it. "service" only checks that the service can be reached, and "robot"
-     * checks for a standard robot that robot_move_joints can move
+     * for it, without using it. "service" only checks that the service can be reached
      */
-    async check(service: string, object: string | undefined, kind: "service" | "event" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[], pending: ReadonlySet<string> = new Set(), store_result?: string): Promise<void>
+    async check(service: string, object: string | undefined, kind: "service" | "event" | "property" | "wire" | "function", name: string, value?: unknown, generator_inputs?: unknown[], pending: ReadonlySet<string> = new Set(), store_result?: string): Promise<void>
     {
         this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
@@ -277,15 +258,6 @@ export class BridgeTools
         if (kind === "event")
         {
             member(stub, name, ["event"]);
-            return;
-        }
-        if (kind === "robot")
-        {
-            robotMember(stub);
-            // The joint count is checked now, so that a wrong one fails before anything moves. A target
-            // that a step will store is checked when the motion starts
-            const target = value === undefined ? undefined : this.jointTarget(stub, value, pending);
-            if (target) checkJointTarget(await stub.getProperty("robot_info") as RobotInfo, target);
             return;
         }
         const m = member(stub, name, [kind]);
@@ -446,10 +418,11 @@ export class BridgeTools
                 : this.keep(stub, store_result, all, { ...returns!, container: "list" });
             return { ...run, results: undefined, stored };
         }
-        if (store_result !== undefined) return { stored: this.keep(stub, store_result, result, m.type!) };
+        if (store_result !== undefined) return withNative({ stored: this.keep(stub, store_result, result, m.type!) }, { value: result, info: this.info(stub, m.type!) });
         if (m.type?.type === "void") return { result: null };
-        const { value, ...kept } = this.output(stub, result, m.type!, direct);
-        return { result: value, ...kept };
+        const out = this.output(stub, result, m.type!, direct);
+        const { value, ...kept } = out;
+        return withNative({ result: value, ...kept }, { value: result, info: this.info(stub, m.type!) });
     }
 
     private openGenerator(stub: ServiceStub, name: string, handle: GeneratorHandle): Record<string, unknown>
@@ -526,8 +499,9 @@ export class BridgeTools
             const call = stub.callFunctionGenNext(handle, param);
             const result = signal ? await untilAborted(call, signal) : await call;
             if (!handle.returnType) return { generator: id, done: false };
-            if (store_result !== undefined) return { generator: id, done: false, stored: this.keep(stub, store_result, result, handle.returnType) };
-            return { generator: id, done: false, ...this.output(stub, result, handle.returnType, direct) };
+            const native = { value: result, info: this.info(stub, handle.returnType) };
+            if (store_result !== undefined) return withNative({ generator: id, done: false, stored: this.keep(stub, store_result, result, handle.returnType) }, native);
+            return withNative({ generator: id, done: false, ...this.output(stub, result, handle.returnType, direct) }, native);
         }
         catch (e)
         {
@@ -590,13 +564,13 @@ export class BridgeTools
         return `${name} has not updated for at least ${Math.round(u.seconds)} seconds: its seqno has stayed at ${u.seqno} in every read since ${new Date(u.since).toISOString()}, and may have stopped changing before then. The device may have stopped sending new values, such as a driver that is no longer running, so this value is out of date.`;
     }
 
-    async readWire(service: string, object: string | undefined, name: string, store_result?: string, auto = false): Promise<Record<string, unknown>>
+    async readWire(service: string, object: string | undefined, name: string, store_result?: string, direct = false): Promise<Record<string, unknown>>
     {
         this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire"]);
         const { value, timestamp } = await stub.peekWireInValue(name);
-        const out: Record<string, unknown> = store_result === undefined ? this.output(stub, value, m.type!, auto) : { stored: this.keep(stub, store_result, value, m.type!) };
+        const out: Record<string, unknown> = withNative(store_result === undefined ? this.output(stub, value, m.type!, direct) : { stored: this.keep(stub, store_result, value, m.type!) }, { value, info: this.info(stub, m.type!) });
         out.read_at = this.timestamp(timestamp);
         const unchanged = this.unchangedFor(service, object, name, value);
         if (unchanged && unchanged.seconds >= NOT_UPDATING_S) out.not_updating = this.notUpdating(name, unchanged);
@@ -677,94 +651,5 @@ export class BridgeTools
         return out;
     }
 
-    /** Move a standard robot to joint positions, building a trajectory that meets the driver's rules */
-    async robotMoveJoints(service: string, object: string | undefined, target: unknown, duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
-    {
-        // Starting a motion selects the command mode, which would stop one already running
-        // By the service's full name, so that two names for one robot cannot both move it
-        const key = `${this.registry.fullServiceName(service)}/${object ?? ""}`;
-        if (this.moving.has(key)) throw new Error(`${service} is already moving. Wait for that motion to finish before starting another.`);
-        this.moving.add(key);
-        try
-        {
-            return await this.moveJoints(service, object, target, duration_s, signal);
-        }
-        finally
-        {
-            this.moving.delete(key);
-        }
-    }
 
-    private async moveJoints(service: string, object: string | undefined, given: unknown, duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
-    {
-        const stub = await this.registry.resolve(service, object);
-        robotMember(stub);
-        const target = this.jointTarget(stub, given)!;
-
-        // Its reads are noted as read_wire's are, so a robot that stops updating after a motion is seen sooner
-        const state = async () =>
-        {
-            const value = (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array; seqno: bigint };
-            this.unchangedFor(service, object, "robot_state", value);
-            return value;
-        };
-        // A robot whose state has stopped updating would never be seen to arrive, so it is not moved
-        const first = await state();
-        if (seqnoOf(first) !== undefined)
-        {
-            const deadline = Date.now() + ROBOT_STATE_CHECK_S * 1000;
-            while (seqnoOf(await state()) === seqnoOf(first))
-            {
-                if (Date.now() > deadline) throw new Error(`robot_state has not updated for ${ROBOT_STATE_CHECK_S} second: its seqno stayed at ${seqnoOf(first)}. The robot's driver may have stopped, so the robot was not moved.`);
-                await sleep(50);
-            }
-        }
-        const start = Array.from((await state()).joint_position);
-        if (target.length !== start.length) throw new Error(`The robot has ${start.length} joints but ${target.length} positions were given.`);
-
-        const info = await stub.getProperty("robot_info") as RobotInfo;
-        checkJointTarget(info, target);
-        const joint_names = info.joint_info.map((j) => j.joint_identifier?.name ?? "");
-
-        const steps = Math.max(4, Math.ceil(duration_s / WAYPOINT_SPACING_S));
-        const waypoints = Array.from({ length: steps + 1 }, (_, i) =>
-        {
-            const blend = (1 - Math.cos(Math.PI * i / steps)) / 2;
-            return {
-                time_from_start: duration_s * i / steps,
-                joint_position: start.map((s, j) => s + blend * (target[j]! - s)),
-                joint_velocity: [],
-                position_tolerance: [],
-                velocity_tolerance: [],
-                interpolation_mode: 0,
-                waypoint_type: 0
-            };
-        });
-
-        await stub.setProperty("command_mode", COMMAND_MODE_HALT);
-        await sleep(100);
-        // Once in trajectory mode, the robot is halted whenever the motion does not complete: when it is
-        // stopped, fails, or runs out of time. After a motion that completes, it is left in trajectory mode
-        const halt = () => stub.setProperty("command_mode", COMMAND_MODE_HALT).catch(() => undefined);
-        const limit_s = duration_s + 30;
-        let run: Record<string, unknown>;
-        try
-        {
-            await stub.setProperty("command_mode", COMMAND_MODE_TRAJECTORY);
-            if (signal?.aborted) throw signal.reason;
-            const generator = await stub.callFunction("execute_trajectory", [{ joint_names, joint_units: null, waypoints, extended: null }]) as GeneratorHandle;
-            run = await this.runGenerator(stub, generator, undefined, limit_s, signal);
-        }
-        catch (e)
-        {
-            await halt();
-            throw e;
-        }
-        if (run.completed !== true)
-        {
-            await halt();
-            throw new Error(`The robot did not finish the motion within ${limit_s} ${limit_s === 1 ? "second" : "seconds"}, so it was aborted and the robot halted.`);
-        }
-        return { ...run, results: undefined, count: undefined, start, target, final_position: Array.from((await state()).joint_position) };
-    }
 }

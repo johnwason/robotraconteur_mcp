@@ -17,7 +17,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 import { errorText } from "./errors.js";
 import { loadConfig, ServiceRegistry } from "./registry.js";
-import { OFFERED_ACTIONS, SEQUENCE_LIMITS, SequenceRunner } from "./sequence.js";
+import { SEQUENCE_ACTIONS, SEQUENCE_LIMITS, SequenceRunner } from "./sequence.js";
 import type { CallStopWhen, SequenceSpec } from "./sequence.js";
 import { help, HELP_CATEGORIES } from "./help.js";
 import { HELP_TOPIC_SUMMARIES, HELP_TOPICS } from "./sequence_help.js";
@@ -64,7 +64,7 @@ const call_stop_when = z.strictObject({
 });
 
 const step = z.strictObject({
-    action: z.enum(OFFERED_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name. wait takes seconds; wait_until takes name and condition, or watch, and timeout_s; stop_when takes the same without timeout_s; end_stop_when takes target. robotraconteur_help topic: actions"),
+    action: z.enum(SEQUENCE_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name. wait takes seconds; wait_until takes name and condition, or watch, and timeout_s; stop_when takes the same without timeout_s; end_stop_when takes target. robotraconteur_help topic: actions"),
     label: z.string().optional().describe("A name for the step, shown in its results, and used by after, only_if, until, and end_stop_when"),
     service: z.string().optional().describe("The service. Defaults to the sequence's service"),
     object: z.string().optional().describe("Path to a sub object. Leave unset for the root object"),
@@ -173,11 +173,12 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name, a.store_result)));
 
     server.registerTool("robotraconteur_scratchpad", {
-        description: "Values kept in this server, so large data such as images can pass between services without going through you. store_result keeps a result, returning it if small, else a summary. A result too large to return is kept as _auto_N. In any value or argument, { \"$scratchpad\": \"path\" } uses a kept value; path is a key with any fields and indexes, such as state.joint_position[2]. set writes value at path; a $scratchpad value copies.",
+        description: "Values kept in this server, so large data such as images can pass between services without going through you. store_result keeps a result, returning it if small, else a summary. Every result is also kept, named in kept_as, such as _r17, until 20 newer ones replace it; a sequence keeps its last data result when it ends. In any value or argument, { \"$scratchpad\": \"path\" } uses a kept value; path is a key with any fields and indexes, such as state.joint_position[2]. set writes value at path; copy and rename keep a value under the key in to.",
         inputSchema: z.object({
-            action: z.enum(["list", "get", "set", "delete"]),
-            path: z.string().optional().describe("A key, optionally with fields and indexes"),
-            value: z.unknown().optional().describe("For set, the value in JSON")
+            action: z.enum(["list", "get", "set", "copy", "rename", "delete"]),
+            path: z.string().optional().describe("A key, optionally with fields and indexes. For rename, a whole key"),
+            value: z.unknown().optional().describe("For set, the value in JSON"),
+            to: z.string().optional().describe("For copy and rename, the new key")
         })
     }, (a) => respond(() =>
     {
@@ -186,6 +187,11 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
         if (a.path === undefined) throw new Error(`${a.action} needs path.`);
         if (a.action === "get") return pad.get(a.path);
         if (a.action === "delete") return pad.delete(a.path);
+        if (a.action === "copy" || a.action === "rename")
+        {
+            if (a.to === undefined) throw new Error(`${a.action} needs to, the new key.`);
+            return a.action === "copy" ? pad.copy(a.path, a.to) : pad.rename(a.path, a.to);
+        }
         if (!("value" in a)) throw new Error("set needs value.");
         return pad.set(a.path, a.value);
     }));

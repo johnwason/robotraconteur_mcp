@@ -104,6 +104,7 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - In value, arguments, generator_inputs, or joint_position, { "$scratchpad": "path" } stands for a kept value, read when the step runs. The path is a key, optionally with fields and indexes, such as pose.joint_position or wp[2]. It can be a whole argument, or one field of a structure given in JSON.
 - Before the sequences start, a path must use a key that already exists or that a step of the call stores. A key stored by another sequence of the call may not be there yet when the step runs, and the step then fails.
 - Keys are shared by every sequence and tool call. Use different keys for sequences that run at the same time.
+- When a sequence ends, however it ended, the result of its last get_property, read_wire, call_function, read_events, or generator_next that returned data is kept too, under the key its status gives in kept_as, such as _r17, so it can be used next without storing it by name. Results kept this way are replaced by newer ones, oldest first, after 20; copy one to a key of your own with set to keep it.
 Capture an image and pass it to a detector:
 { "sequences": [{ "steps": [
     { "action": "call_function", "service": "camera", "name": "capture_frame", "store_result": "img" },
