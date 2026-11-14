@@ -145,7 +145,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, undefined, 60, ctx.mcpReq.signal, a.store_result, true)));
 
     server.registerTool("robotraconteur_generator", {
-        description: "Step a generator that robotraconteur_call_function started. next waits for its next result, or gives done true once it has ended; close ends it; abort stops it at once, such as a motion. Cancelling a next aborts it. Sequences can step it with generator_next.",
+        description: "Step a generator that robotraconteur_call_function started. next waits for its next result, or gives done true once it has ended; close ends it; abort stops it at once, such as a motion. Cancelling a next aborts it. To keep working while next waits, run it as a generator_next sequence step.",
         inputSchema: z.object({
             generator: z.string().describe("The generator id from robotraconteur_call_function"),
             action: z.enum(["next", "close", "abort"]),
