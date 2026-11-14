@@ -171,17 +171,17 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("offers a fixed list of tools", async () =>
     {
         const { tools } = await bridge.listTools();
-        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_scratchpad", "robotraconteur_start_sequence", "robotraconteur_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
+        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_generator", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_scratchpad", "robotraconteur_start_sequence", "robotraconteur_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
         for (const t of tools) assert.ok((t.description?.length ?? 0) > 20, t.name);
         // The tool list is loaded on every turn, so the detailed sequence rules are in robotraconteur_help
         const size = (name: string) => JSON.stringify(tools.find((t) => t.name === name)).length;
         assert.ok(size("robotraconteur_start_sequence") < 13000, `start_sequence is ${size("robotraconteur_start_sequence")} characters`);
-        // 28000 before the scratchpad, which adds about 1.7 K
-        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 29700, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
-        // The scratchpad adds little to the list: its tool, and a short store_result on five schemas
+        // 28000 before the scratchpad, which adds about 1.7 K, and 29700 before robotraconteur_generator, about 0.35 K net
+        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 30100, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
+        // The scratchpad adds little to the list: its tool, and a short store_result on six schemas
         const store_result = tools.reduce((n, t) => n + JSON.stringify(t).split('"store_result"').length - 1, 0);
         const added = size("robotraconteur_scratchpad") + tools.reduce((n, t) => n + (JSON.stringify(t).match(/"store_result":\{[^}]*\}/g) ?? []).join("").length, 0);
-        assert.equal(store_result, 5);
+        assert.equal(store_result, 6);
         assert.ok(added < 1600, `the scratchpad adds ${added} characters`);
     });
 
@@ -391,11 +391,24 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         await ok(bridge, "robotraconteur_describe", { service: TEST_SERVICE, member: "o6" });
     });
 
-    test("a generator that needs inputs is checked before it starts", async () =>
+    test("a generator that takes a value at each step is given one with each next", async () =>
     {
         const service = "RobotRaconteurTestService2";
-        await fails(bridge, "robotraconteur_call_function", { service, name: "gen_func4" }, /Give them in generator_inputs/);
-        await fails(bridge, "robotraconteur_call_function", { service, name: "gen_func4", generator_inputs: ["x"] }, /generator_inputs\[0\]/);
+        const started = await ok(bridge, "robotraconteur_call_function", { service, name: "gen_func4" });
+        assert.match(started.generator, /^gen-\d+$/);
+        assert.equal(started.takes, "uint8[]");
+        assert.equal(started.returns, "uint8[]");
+        const generator = started.generator;
+        await fails(bridge, "robotraconteur_generator", { generator, action: "next" }, /takes a value at each step\. Give it in value/);
+        await fails(bridge, "robotraconteur_generator", { generator, action: "next", value: ["x"] }, /value\[0\]: expected a uint8/);
+        assert.deepEqual((await ok(bridge, "robotraconteur_generator", { generator, action: "next", value: [1, 2, 3] })).value, [1, 2, 3]);
+        assert.deepEqual((await ok(bridge, "robotraconteur_generator", { generator, action: "next", value: [1, 2] })).value, [2, 3]);
+        assert.deepEqual(await ok(bridge, "robotraconteur_generator", { generator, action: "abort" }), { generator, done: true, aborted: true });
+        const after = await ok(bridge, "robotraconteur_generator", { generator, action: "next", value: [1] });
+        assert.equal(after.done, true);
+        assert.match(after.ended, /aborted/);
+        await fails(bridge, "robotraconteur_generator", { generator: "gen-999", action: "next" }, /There is no generator gen-999/);
+        await fails(bridge, "robotraconteur_call_function", { service, name: "gen_func1", store_result: "x" }, /store_result goes on each robotraconteur_generator next/);
     });
 
     test("a configured service that cannot be reached is explained", async () =>
@@ -550,7 +563,55 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         await new Promise((resolve) => setTimeout(resolve, 100));
         await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "trajectory" });
         const trajectory = { joint_names: [`joint_1`, "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"], waypoints: [{ joint_position: [0, 0, 0, 0, 0, 0] }] };
+        // The driver checks the trajectory when the generator is started
         await fails(bridge, "robotraconteur_call_function", { service, name: "execute_trajectory", arguments: [trajectory] }, /five or more waypoints/);
+    });
+
+    test("a trajectory called directly reports its progress with next, and cancelling a next stops it partway", { timeout: 60000 }, async () =>
+    {
+        const service = "robot_b.robot";
+        // The driver requires waypoints at most 100 ms apart: 0 to 0.3 rad over 3 s, every 50 ms
+        const waypoints = Array.from({ length: 61 }, (_, i) => ({ time_from_start: i * 0.05, joint_position: [0.005 * i, 0, 0, 0, 0, 0] }));
+        const trajectory = { joint_names: ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"], waypoints };
+        const run = async () =>
+        {
+            await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "halt" });
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "trajectory" });
+            return (await ok(bridge, "robotraconteur_call_function", { service, name: "execute_trajectory", arguments: [trajectory] })).generator;
+        };
+
+        // Each next gives one status, while the motion goes on
+        let generator = await run();
+        const statuses: any[] = [];
+        for (;;)
+        {
+            const r = await ok(bridge, "robotraconteur_generator", { generator, action: "next" });
+            if (r.done) break;
+            statuses.push(r.value);
+        }
+        // This driver gives a status when the motion ends, so one next can wait for the whole motion
+        assert.ok(statuses.length >= 1, JSON.stringify(statuses));
+        assert.equal(statuses[statuses.length - 1].action_status.name, "complete", JSON.stringify(statuses));
+        const arrived = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
+        assert.ok(Math.abs(arrived[0] - 0.3) < 1e-3, String(arrived[0]));
+
+        // Back from 0.3 to 0, aborted partway
+        trajectory.waypoints = waypoints.map((w) => ({ ...w, joint_position: [0.3 - w.joint_position[0]!, 0, 0, 0, 0, 0] }));
+        generator = await run();
+        const abort = new AbortController();
+        const waiting = bridge.callTool({ name: "robotraconteur_generator", arguments: { generator, action: "next" } }, { signal: abort.signal, timeout: 30000 });
+        // The driver takes about a second to begin a trajectory
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        abort.abort();
+        await assert.rejects(waiting);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const ended = await ok(bridge, "robotraconteur_generator", { generator, action: "next" });
+        assert.equal(ended.done, true);
+        assert.match(ended.ended, /aborted when its next was cancelled/);
+        const stopped = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
+        assert.ok(stopped[0] > 0.02 && stopped[0] < 0.28, `stopped partway, at ${stopped[0]}`);
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
     });
 
     test("reads every part of Core's test service", async () =>
@@ -566,12 +627,45 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         await fails(bridge, "robotraconteur_describe", { service, object: "bad path!" }, /Invalid object path/);
     });
 
-    test("runs generators to completion", async () =>
+    test("steps a generator one result at a time, and a sequence step runs one to its end", async () =>
     {
-        const r = await ok(bridge, "robotraconteur_call_function", { service: "RobotRaconteurTestService2", name: "gen_func1" });
-        assert.equal(r.completed, true);
-        assert.ok(r.count > 0);
-        assert.ok(r.results.length > 0 && r.results.length <= 20);
+        const service = "RobotRaconteurTestService2";
+        const { generator } = await ok(bridge, "robotraconteur_call_function", { service, name: "gen_func1" });
+        const values: number[] = [];
+        for (;;)
+        {
+            const r = await ok(bridge, "robotraconteur_generator", { generator, action: "next" });
+            if (r.done) break;
+            values.push(r.value);
+        }
+        assert.deepEqual(values, Array.from({ length: 16 }, (_, i) => i));
+
+        const second = (await ok(bridge, "robotraconteur_call_function", { service, name: "gen_func1" })).generator;
+        await ok(bridge, "robotraconteur_generator", { generator: second, action: "next", store_result: "first_value" });
+        assert.deepEqual(await ok(bridge, "robotraconteur_generator", { generator: second, action: "close" }), { generator: second, done: true, closed: true });
+
+        // A sequence step runs it to its end, in the server
+        const r = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 20, sequences: [{ steps: [{ action: "call_function", service, name: "gen_func1", label: "all" }] }] });
+        const all = r.sequences[0].results.find((x: { label?: string }) => x.label === "all").result;
+        assert.equal(all.completed, true);
+        assert.equal(all.count, 16);
+    });
+
+    test("a sequence polls a generator in the background", async () =>
+    {
+        const service = "RobotRaconteurTestService2";
+        const { generator } = await ok(bridge, "robotraconteur_call_function", { service, name: "gen_func1" });
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ on_stop: [{ action: "generator_next", generator }], steps: [{ action: "noop" }] }] }, /on_stop runs at once, so it cannot use generator_next/);
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ steps: [{ action: "generator_next", generator: "gen-999" }] }] }, /There is no generator gen-999/);
+        const r = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 20, detail: "full", sequences: [{ steps: [
+            { action: "generator_next", generator, repeat: { count: 20, every_s: 0.05 }, store_result: "latest" }
+        ] }] });
+        const seq = r.sequences[0];
+        assert.equal(seq.state, "completed", JSON.stringify(seq));
+        assert.equal(seq.results.length, 20);
+        assert.equal(seq.results.filter((x: any) => x.result.done === false).length, 16);
+        assert.equal(seq.results[19].result.done, true);
+        assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "latest" })).value, 15);
     });
 
     test("collects events", async () =>
@@ -1805,7 +1899,8 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         assert.equal(mixed.result, expected);
 
         const listed = await ok(bridge, "robotraconteur_scratchpad", { action: "list" });
-        assert.deepEqual(listed.keys.map((k: { key: string }) => k.key).filter((k: string) => !k.startsWith("_auto_")).sort(), ["back", "img"]);
+        const names = listed.keys.map((k: { key: string }) => k.key);
+        assert.ok(names.includes("back") && names.includes("img"), names.join());
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "back" });
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "img" });
     });

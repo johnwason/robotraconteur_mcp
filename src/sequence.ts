@@ -23,7 +23,7 @@ import type { ReceivedEvent } from "./registry.js";
 import { untilAborted } from "./tools.js";
 import type { BridgeTools } from "./tools.js";
 
-export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when", "noop"] as const;
+export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when", "noop", "generator_next", "generator_close", "generator_abort"] as const;
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number];
 
 /** One of the things a wait_until step watches, with its own condition */
@@ -132,6 +132,7 @@ export interface SequenceStep
     max_late_s?: number;
     only_if?: Record<string, unknown>;
     target?: string;
+    generator?: string;
     store_result?: string;
     repeat?: { count: number; every_s: number };
     continue_on_error?: boolean;
@@ -155,12 +156,15 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
     wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"],
     stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"],
     end_stop_when: ["target"],
-    noop: []
+    noop: [],
+    generator_next: ["generator", "value", "store_result"],
+    generator_close: ["generator"],
+    generator_abort: ["generator"]
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "at", "max_late", "max_late_s", "only_if", "repeat", "continue_on_error"];
 
 /** Actions on_stop cannot use, since they wait, and fields it cannot use, since they schedule */
-const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints"];
+const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints", "generator_next"];
 const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "at", "max_late", "max_late_s", "repeat", "continue_on_error"];
 /** The most steps on_stop can have, and how long they can take together */
 const MAX_ON_STOP = 20;
@@ -182,7 +186,7 @@ export const SEQUENCE_LIMITS = {
 const MAX_STATUS_BYTES = 64 * 1024;
 const MAX_STATUS_RESULTS = 200;
 /** Actions that stop by themselves when the sequence is aborted */
-const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "robot_move_joints"];
+const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "robot_move_joints", "generator_next"];
 /** The most things one wait_until step can watch */
 const MAX_WATCH = 10;
 /** The most of each value shown when a wait_until times out */
@@ -819,6 +823,13 @@ export class SequenceRunner
             return;
         }
         if (step.action === "end_stop_when" || step.action === "noop") return;
+        if (step.action === "generator_next" || step.action === "generator_close" || step.action === "generator_abort")
+        {
+            need("generator");
+            this.tools.checkGenerator(step.generator!, step.action === "generator_next", step.value, pending);
+            if (step.store_result !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(step.store_result)) throw new Error(`store_result must be a key, such as img, not "${step.store_result}".`);
+            return;
+        }
         if (step.action === "wait_until" || step.action === "stop_when")
         {
             if (step.action === "stop_when" && step.repeat) throw new Error("A stop_when step cannot repeat.");
@@ -959,6 +970,11 @@ export class SequenceRunner
             return await this.tools.robotMoveJoints(s, step.object, step.joint_position!, step.duration_s!, signal);
         case "wait_until":
             return await this.waitUntil(step, signal, sequence);
+        case "generator_next":
+            return await this.tools.generatorNext(step.generator!, step.value, step.store_result, signal, false);
+        case "generator_close":
+        case "generator_abort":
+            return await this.tools.generatorEnd(step.generator!, step.action === "generator_abort");
         }
     }
 

@@ -37,12 +37,13 @@ export const HELP_TOPIC_SUMMARIES: Record<HelpTopic, string> = {
 const HELP: Record<HelpTopic, string> = {
     actions: `Actions take the arguments of the tool of the same name, on the step's service, or the sequence's service if the step names none. Steps can use different services.
 - get_property (name), set_property (name, value), read_wire (name), write_wire (name, value).
-- call_function (name, arguments as an array or an object keyed by parameter name, and for a generator generator_inputs and timeout_s, default 60). Its result is the function's return value, or for a generator, how it ran and its last results.
+- call_function (name, arguments as an array or an object keyed by parameter name, and for a generator generator_inputs and timeout_s, default 60). Its result is the function's return value. A generator runs to its end, and its result is how it ran and its last results.
+- generator_next (generator, value if it takes one, store_result), generator_close and generator_abort (generator): step a generator that robotraconteur_call_function started, such as to poll a long operation in the background with repeat. generator_next waits for the result, and gives done true once the generator has ended, as often as it is called. A cancel or stop while generator_next waits aborts the generator. on_stop can use generator_close and generator_abort.
 - read_events (name to only return those events, clear default true, limit default 50).
 - robot_move_joints (joint_position, duration_s at most 100). It lasts until the robot arrives, so to act during a motion, start a second sequence. A target outside a joint's limits is refused before the sequence starts. After it completes, the robot is left in trajectory command mode.
 - wait (seconds). noop does nothing, such as to anchor timing with at.
 - wait_until (name and condition, or watch; timeout_s), stop_when (name and condition, or watch), end_stop_when (target): see waiting and stopping.
-Arguments are fixed when the sequence starts: a step cannot use an earlier step's result, such as passing a value one step read as another step's argument. To act on a result, branch on it with only_if, or read it in the step's result and start a new sequence.
+Arguments are fixed when the sequence starts, except $scratchpad references, which are read when the step runs, so a step can use what an earlier step kept with store_result (see scratchpad). To act on a result otherwise, branch on it with only_if.
 Fields for any action: label, at_s, after, at, max_late, max_late_s, only_if, repeat { count, every_s } to run the step several times at a fixed interval, such as to sample a wire (every run must start before max_duration_s; the last starts (count - 1) × every_s after the first), and continue_on_error to go on if the step fails.
 Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns} runs counting repeats per sequence, ${SEQUENCE_LIMITS.maxRunning} sequences running at once, max_duration_s at most ${SEQUENCE_LIMITS.maxDuration} (default ${SEQUENCE_LIMITS.defaultDuration}).`,
 

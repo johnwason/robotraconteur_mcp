@@ -14,7 +14,7 @@
 
 import { parseTypeDefinition, RobotRaconteurError } from "robotraconteur";
 import type { GeneratorHandle, MemberDefinition, ServiceStub, TypeDefinition } from "robotraconteur";
-import { Codec } from "./codec.js";
+import { Codec, typeName } from "./codec.js";
 import { describeObject } from "./describe.js";
 import type { ReceivedEvent, ServiceRegistry } from "./registry.js";
 import { parsePath, Scratchpad } from "./scratchpad.js";
@@ -23,6 +23,21 @@ import { parsePath, Scratchpad } from "./scratchpad.js";
 const MAX_RESULT_BYTES = 64 * 1024;
 const SUMMARIZED = { maxArray: 32 };
 const KEPT_GENERATOR_RESULTS = 20;
+/** The most generators the model can have open at once, so that forgotten ones do not pile up on services */
+export const MAX_OPEN_GENERATORS = 16;
+/** How many ended generators are remembered, so that next on one says it has ended */
+const KEPT_ENDED_GENERATORS = 50;
+
+/** A generator started by a direct call_function, stepped by robotraconteur_generator and generator steps */
+interface OpenGenerator
+{
+    stub: ServiceStub;
+    handle: GeneratorHandle;
+    /** The function, for messages */
+    name: string;
+    /** Whether a next is waiting for the service, since a generator takes one request at a time */
+    busy: boolean;
+}
 const COMMAND_MODE_HALT = 0;
 const COMMAND_MODE_TRAJECTORY = 2;
 const WAYPOINT_SPACING_S = 0.05;
@@ -146,6 +161,10 @@ function sleep(ms: number): Promise<void>
 export class BridgeTools
 {
     private moving = new Set<string>();
+    private generators = new Map<string, OpenGenerator>();
+    /** Generators that have ended, oldest first, with how */
+    private ended = new Map<string, string>();
+    private next_generator = 1;
     /** The last sequence number seen on each wire, and since when, by service, object, and wire */
     private seqnos = new Map<string, { seqno: string; since: number }>();
 
@@ -380,17 +399,27 @@ export class BridgeTools
         }
     }
 
-    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, store_result?: string, auto = false): Promise<Record<string, unknown>>
+    /**
+     * Call a function. direct is a call from the model rather than a sequence step: a large result is
+     * kept in the scratchpad, and a generator is started and returned for robotraconteur_generator to
+     * step, rather than run to its end
+     */
+    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, store_result?: string, direct = false): Promise<Record<string, unknown>>
     {
         this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["function"]);
         const returns = m.type?.container === "generator" ? withoutGenerator(m.type) : m.type;
+        const generator = m.type?.container === "generator" || m.parameters?.some((p) => p.type.container === "generator");
+        if (direct && generator)
+        {
+            if (store_result !== undefined) throw new Error(`${name} is a generator, which gives a result at each step, so store_result goes on each robotraconteur_generator next.`);
+            if (this.generators.size >= MAX_OPEN_GENERATORS) throw new Error(`${MAX_OPEN_GENERATORS} generators are already open: ${[...this.generators.keys()].join(", ")}. Close or abort ones that are no longer needed with robotraconteur_generator.`);
+        }
         if (store_result !== undefined && (!returns || returns.type === "void")) throw new Error(`${name} returns nothing, so there is no result to store.`);
         const converted = this.convertArguments(stub, m, args);
         // Checked before the call, because a generator that has started must be closed
-        const inputs = this.convertGeneratorInputs(stub, m, generator_inputs);
-        const generator = m.type?.container === "generator" || m.parameters?.some((p) => p.type.container === "generator");
+        const inputs = direct ? undefined : this.convertGeneratorInputs(stub, m, generator_inputs);
         const call = stub.callFunction(name, converted);
         let result: unknown;
         try
@@ -405,6 +434,7 @@ export class BridgeTools
             if (generator && signal?.aborted) void call.then((h) => stub.callFunctionGenAbort(h as GeneratorHandle)).catch(() => undefined);
             throw e;
         }
+        if (generator && direct) return this.openGenerator(stub, name, result as GeneratorHandle);
         if (generator)
         {
             if (store_result === undefined) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal);
@@ -418,8 +448,120 @@ export class BridgeTools
         }
         if (store_result !== undefined) return { stored: this.keep(stub, store_result, result, m.type!) };
         if (m.type?.type === "void") return { result: null };
-        const { value, ...kept } = this.output(stub, result, m.type!, auto);
+        const { value, ...kept } = this.output(stub, result, m.type!, direct);
         return { result: value, ...kept };
+    }
+
+    private openGenerator(stub: ServiceStub, name: string, handle: GeneratorHandle): Record<string, unknown>
+    {
+        const id = `gen-${this.next_generator++}`;
+        this.generators.set(id, { stub, handle, name, busy: false });
+        const out: Record<string, unknown> = { generator: id };
+        if (handle.paramType) out.takes = typeName(handle.paramType);
+        if (handle.returnType) out.returns = typeName(handle.returnType);
+        out.note = `${name} is a generator. Call robotraconteur_generator next with this id for each result${handle.paramType ? ", giving value each time" : ""}, until done is true, or close or abort it.`;
+        return out;
+    }
+
+    /** An open generator, or why there is none */
+    private openGeneratorFor(id: string): OpenGenerator
+    {
+        const g = this.generators.get(id);
+        if (g) return g;
+        const ended = this.ended.get(id);
+        if (ended) throw new Error(`Generator ${id} has ended: ${ended}`);
+        const open = [...this.generators.keys()];
+        throw new Error(`There is no generator ${id}. ${open.length ? `Open generators: ${open.join(", ")}.` : "No generators are open."} A direct robotraconteur_call_function of a generator function starts one.`);
+    }
+
+    private endGenerator(id: string, how: string): void
+    {
+        this.generators.delete(id);
+        this.ended.set(id, how);
+        for (const k of this.ended.keys())
+        {
+            if (this.ended.size <= KEPT_ENDED_GENERATORS) break;
+            this.ended.delete(k);
+        }
+    }
+
+    /**
+     * Check a generator step before a sequence starts: the generator is open, and a value is given for
+     * it if and only if it takes one, converted to its type
+     */
+    checkGenerator(id: string, next: boolean, value: unknown, pending: ReadonlySet<string>): void
+    {
+        const g = this.openGeneratorFor(id);
+        if (!next) return;
+        if (g.handle.paramType && value === undefined) throw new Error(`Generator ${id} (${g.name}) takes a value at each step. Give it in value.`);
+        if (!g.handle.paramType && value !== undefined) throw new Error(`Generator ${id} (${g.name}) does not take a value.`);
+        if (value !== undefined) this.codec(g.stub, pending).fromJson(value, g.handle.paramType!, scope(g.stub), "value");
+    }
+
+    /**
+     * The next result of a generator, waiting as long as the service takes. done is true when it has
+     * ended. If the signal aborts, the generator is aborted on the service, so that a motion stops
+     */
+    async generatorNext(id: string, value: unknown, store_result: string | undefined, signal: AbortSignal | undefined, direct: boolean): Promise<Record<string, unknown>>
+    {
+        this.checkKey(store_result);
+        if (!this.generators.has(id) && this.ended.has(id)) return { generator: id, done: true, ended: this.ended.get(id) };
+        const g = this.openGeneratorFor(id);
+        const { stub, handle } = g;
+        if (g.busy) throw new Error(`Generator ${id} is already waiting for its next result. A generator takes one request at a time.`);
+        if (handle.paramType && value === undefined) throw new Error(`Generator ${id} (${g.name}) takes a value at each step. Give it in value.`);
+        if (!handle.paramType && value !== undefined) throw new Error(`Generator ${id} (${g.name}) does not take a value.`);
+        if (store_result !== undefined && !handle.returnType) throw new Error(`Generator ${id} (${g.name}) returns nothing, so there is no result to store.`);
+        const param = value === undefined ? undefined : this.codec(stub).fromJson(value, handle.paramType!, scope(stub), "value");
+        g.busy = true;
+        const abort = () =>
+        {
+            this.endGenerator(id, "it was aborted when its next was cancelled.");
+            void stub.callFunctionGenAbort(handle).catch(() => undefined);
+        };
+        signal?.addEventListener("abort", abort, { once: true });
+        try
+        {
+            if (signal?.aborted) abort();
+            const call = stub.callFunctionGenNext(handle, param);
+            const result = signal ? await untilAborted(call, signal) : await call;
+            if (!handle.returnType) return { generator: id, done: false };
+            if (store_result !== undefined) return { generator: id, done: false, stored: this.keep(stub, store_result, result, handle.returnType) };
+            return { generator: id, done: false, ...this.output(stub, result, handle.returnType, direct) };
+        }
+        catch (e)
+        {
+            if (signal?.aborted) throw signal.reason;
+            if (e instanceof RobotRaconteurError && e.isStopIteration)
+            {
+                this.endGenerator(id, "it finished.");
+                return { generator: id, done: true };
+            }
+            // A generator whose step failed has ended on the service
+            this.endGenerator(id, `its last next failed: ${e instanceof Error ? e.message : String(e)}`);
+            throw e;
+        }
+        finally
+        {
+            g.busy = false;
+            signal?.removeEventListener("abort", abort);
+        }
+    }
+
+    /** End a generator: close lets it finish normally, abort stops it at once, such as a motion */
+    async generatorEnd(id: string, abort: boolean): Promise<Record<string, unknown>>
+    {
+        if (!this.generators.has(id) && this.ended.has(id)) return { generator: id, done: true, ended: this.ended.get(id) };
+        const { stub, handle } = this.openGeneratorFor(id);
+        this.endGenerator(id, abort ? "it was aborted." : "it was closed.");
+        await (abort ? stub.callFunctionGenAbort(handle) : stub.callFunctionGenClose(handle));
+        return { generator: id, done: true, [abort ? "aborted" : "closed"]: true };
+    }
+
+    /** Abort every open generator, such as when the server shuts down, so that none runs unattended */
+    async abortAllGenerators(): Promise<void>
+    {
+        await Promise.all([...this.generators.keys()].map((id) => this.generatorEnd(id, true).catch(() => undefined)));
     }
 
     private timestamp(t: { seconds: bigint; nanoseconds: number }): string

@@ -71,10 +71,10 @@ const step = z.strictObject({
     service: z.string().optional().describe("The service. Defaults to the sequence's service"),
     object: z.string().optional().describe("Path to a sub object. Leave unset for the root object"),
     name: z.string().optional().describe("The property, function, wire, or event"),
-    value: z.unknown().optional().describe("For set_property and write_wire, the value in JSON"),
+    value: z.unknown().optional().describe("For set_property, write_wire, and generator_next, the JSON value"),
     arguments: z.unknown().optional().describe("For call_function, an array of arguments or an object keyed by parameter name"),
     generator_inputs: z.array(z.unknown()).optional().describe("For call_function of a generator that takes a value at each step"),
-    timeout_s: z.number().positive().optional().describe("For wait_until, how long to wait before the step fails. For a generator call_function, abort after this long; the default is 60"),
+    timeout_s: z.number().positive().optional().describe("For wait_until, how long to wait before the step fails. For a generator call_function, abort after this long, default 60"),
     joint_position: joint_position.optional().describe("For robot_move_joints, the target position of every joint"),
     duration_s: z.number().positive().max(100).optional().describe("For robot_move_joints, how long the motion takes in seconds"),
     seconds: z.number().min(0).optional().describe("For wait, how long to wait"),
@@ -82,16 +82,17 @@ const step = z.strictObject({
     watch: z.array(watch_entry).min(1).max(10).optional().describe("For wait_until and stop_when, several things to watch in place of name and condition; any one met ends the step unless combine says otherwise. robotraconteur_help topic: waiting"),
     new_events_only: z.boolean().optional().describe("For wait_until and stop_when, only count events received after the step starts. By default an earlier unread event also counts. Leave it off for a stop_when on an operator request or a fault, so that one sent before the sequence started, such as between sequences, still stops it. robotraconteur_help topic: events"),
     combine: z.record(z.string(), z.unknown()).optional().describe("With watch, a MongoDB query over the entries by key, each true or false, such as { \"msg\": true, \"arm_ok\": true }. robotraconteur_help topic: waiting"),
-    check_every_s: z.number().min(SEQUENCE_LIMITS.minEvery).optional().describe("For wait_until and stop_when, how often to read wires and properties. The default is 0.05"),
-    clear: z.boolean().optional().describe("For read_events, remove the returned events. The default is true"),
-    store_result: z.string().optional().describe("Keep the result in the scratchpad under this key. robotraconteur_help topic: scratchpad"),
-    limit: z.number().int().positive().max(200).optional().describe("For read_events, the most events to return. The default is 50"),
+    check_every_s: z.number().min(SEQUENCE_LIMITS.minEvery).optional().describe("For wait_until and stop_when, how often to read wires and properties; default 0.05"),
+    clear: z.boolean().optional().describe("For read_events, remove the returned events; default true"),
+    store_result: z.string().optional().describe("Keep the result under this key. robotraconteur_help topic: scratchpad"),
+    limit: z.number().int().positive().max(200).optional().describe("For read_events, the most events to return; default 50"),
     at_s: z.number().min(0).optional().describe("Start this many seconds after the sequence started, or with after, after that step ended. The step must start on time or it fails. robotraconteur_help topic: timing"),
     target: z.string().optional().describe("For end_stop_when, the label of the stop_when to end, or none to end all"),
+    generator: z.string().optional().describe("The generator id"),
     at: z.string().optional().describe("Start at this absolute ISO 8601 time, from now plus a margin. The step must start on time or it fails. robotraconteur_help topic: timing"),
     max_late: z.string().optional().describe("The latest ISO time the step may start; it fails if it comes up later. Defaults to at"),
     max_late_s: z.number().min(0).optional().describe("The latest the step may start, counted as at_s is; it fails if it comes up later. Defaults to at_s"),
-    only_if: z.record(z.string(), z.unknown()).optional().describe("Run the step only if this MongoDB query on earlier labelled steps' { ok, skipped, result, error } holds, such as { \"answer.ok\": true }; otherwise skip it at once, with no wait. robotraconteur_help topic: skipping"),
+    only_if: z.record(z.string(), z.unknown()).optional().describe("Run the step only if this MongoDB query on earlier labelled steps' { ok, skipped, result, error } holds, such as { \"answer.ok\": true }; otherwise skip it at once. robotraconteur_help topic: skipping"),
     after: z.string().optional().describe("The label of an earlier step; at_s then counts from when it ended. robotraconteur_help topic: timing"),
     repeat: z.strictObject({
         count: z.number().int().positive().describe("How many times to run the step"),
@@ -133,17 +134,25 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, ({ service: s, object: o, name: n, value }) => respond(() => tools.setProperty(s, o, n, value)));
 
     server.registerTool("robotraconteur_call_function", {
-        description: "Call a function of a service. Arguments are given in order as an array, or by name as an object. Fields left out of a structure are filled with zero or empty values. A function that streams results as a generator is run to completion, and its last results are returned. The call waits until the generator finishes, so it cannot be stopped partway; to be able to stop a long generator, such as a trajectory, run it as a call_function step of robotraconteur_start_sequence, which robotraconteur_cancel_sequence aborts. " + PARALLEL_NOTE,
+        description: "Call a function of a service. Arguments are given in order as an array, or by name as an object. Fields left out of a structure are filled with zero or empty values. A generator function, for a long operation such as a trajectory or for data in parts, is started and returns a generator id; get each result with robotraconteur_generator. " + PARALLEL_NOTE,
         inputSchema: z.object({
             service,
             object,
             name: name("function"),
             arguments: z.unknown().optional().describe("An array of arguments, or an object keyed by parameter name"),
-            generator_inputs: z.array(z.unknown()).optional().describe("For a generator that takes a value at each step, the values to send"),
-            timeout_s: z.number().positive().optional().describe("For a generator, abort after this many seconds. The default is 60"),
             store_result
         })
-    }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60, ctx.mcpReq.signal, a.store_result, true)));
+    }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, undefined, 60, ctx.mcpReq.signal, a.store_result, true)));
+
+    server.registerTool("robotraconteur_generator", {
+        description: "Step a generator that robotraconteur_call_function started. next waits for its next result, or gives done true once it has ended; close ends it; abort stops it at once, such as a motion. Cancelling a next aborts it. Sequences can step it with generator_next.",
+        inputSchema: z.object({
+            generator: z.string().describe("The generator id from robotraconteur_call_function"),
+            action: z.enum(["next", "close", "abort"]),
+            value: z.unknown().optional().describe("For next, if the generator takes a value"),
+            store_result
+        })
+    }, (a, ctx) => respond(() => a.action === "next" ? tools.generatorNext(a.generator, a.value, a.store_result, ctx.mcpReq.signal, true) : tools.generatorEnd(a.generator, a.action === "abort")));
 
     server.registerTool("robotraconteur_read_wire", {
         description: "Read the latest value of a wire. Wires carry continuously updated data such as robot state and sensor readings. read_at is when it was read, not when the device last updated it. not_updating appears when a standard state's seqno has not changed for 5 s: the device stopped sending.",
@@ -197,7 +206,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
 
     server.registerTool("robotraconteur_start_sequence", {
         description: `Start one or more timed sequences of steps, and return at once with each one's sequence_id. The steps run in the server without a round trip through the model, so their timing is exact. Before writing your first sequence, read robotraconteur_help topics actions, timing, and stopping, and others as needed, such as waiting, conditions, on_stop, skipping, events, and examples, in one call.
-Essentials: steps of a sequence run one at a time, in order. Sequences in one call start together on one clock, and every step is checked before any starts, so nothing starts if any step is wrong. A step with at_s or at starts on time or fails. wait_until waits for a condition on a wire, property, or event. stop_when watches in the background and stops its sequence when its condition is met; to stop every sequence of a call on one condition, use the call's stop_when. An active stop_when, including the call's, holds only the events it matches, so the stop wins and other events still reach wait_until. on_stop steps clean up after any early end and cannot wait. The first step of any sequence to match an event takes it. Step arguments are fixed when the sequence starts: a step cannot use an earlier step's result, so branch on it with only_if, or read it and start a new sequence. Follow sequences with robotraconteur_sequence_status. A sequence keeps running if the conversation is interrupted. A cancel arrives a turn late, so put planned stops in max_duration_s or stop_when. Anything that must interrupt a running sequence, such as an operator request, a fault, or a sensor limit, needs a stop_when in that sequence or the call's stop_when, with on_stop to make the device safe; checked only between sequences, it waits until the running step ends.`,
+Essentials: steps of a sequence run one at a time, in order. Sequences in one call start together on one clock, and every step is checked before any starts, so nothing starts if any step is wrong. A step with at_s or at starts on time or fails. wait_until waits for a condition on a wire, property, or event. stop_when watches in the background and stops its sequence when its condition is met; to stop every sequence of a call on one condition, use the call's stop_when. An active stop_when, including the call's, holds only the events it matches, so the stop wins and other events still reach wait_until. on_stop steps clean up after any early end and cannot wait. The first step of any sequence to match an event takes it. A step uses an earlier step's result only through store_result and $scratchpad, or branches on it with only_if. Follow sequences with robotraconteur_sequence_status. A sequence keeps running if the conversation is interrupted. A cancel arrives a turn late, so put planned stops in max_duration_s or stop_when. Anything that must interrupt a running sequence, such as an operator request, a fault, or a sensor limit, needs a stop_when in that sequence or the call's stop_when, with on_stop to make the device safe; checked only between sequences, it waits until the running step ends.`,
         inputSchema: z.object({
             sequences: z.array(z.strictObject({
                 label: z.string().optional().describe("A name for this sequence, shown in its results and the list of sequences. Labels must differ"),
@@ -270,7 +279,7 @@ async function main(): Promise<void>
     // Running sequences are cancelled first, so that a robot is not left moving
     const shutdown = () =>
     {
-        void sequences.cancelAll().finally(() => registry.close()).finally(() => process.exit(0));
+        void sequences.cancelAll().finally(() => tools.abortAllGenerators()).finally(() => registry.close()).finally(() => process.exit(0));
     };
     process.stdin.on("end", shutdown);
     process.on("SIGTERM", shutdown);
