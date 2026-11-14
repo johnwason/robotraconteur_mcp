@@ -40,7 +40,6 @@ const HELP: Record<HelpTopic, string> = {
 - call_function (name, arguments as an array or an object keyed by parameter name, and for a generator generator_inputs and timeout_s, default 60). Its result is the function's return value. A generator runs to its end, and its result is how it ran and its last results.
 - generator_next (generator, value if it takes one, store_result), generator_close and generator_abort (generator): act on a generator that robotraconteur_call_function started. A direct robotraconteur_generator next holds you until the service answers, which for a trajectory can be the whole motion, so to keep working meanwhile, run next as a generator_next step and follow it with robotraconteur_sequence_status or its store_result key. Either start a one-step sequence for each next, starting another while done is false, or give the step a repeat with a generous count, which stops once done is true; without at_s, a run that comes up while the previous next is still waiting starts as soon as it ends, so runs never overlap. The service decides when each next returns, such as a trajectory reporting its status every few seconds, so repeat cannot make results come faster; for progress in between, read the device's state wire. generator_next gives done true once the generator has ended, as often as it is called. A cancel, a stop, or reaching max_duration_s while it waits aborts the generator, and a motion with it, so give max_duration_s more than the operation takes. on_stop can use generator_close and generator_abort.
 - read_events (name to only return those events, clear default true, limit default 50).
-- robot_move_joints (joint_position, duration_s at most 100). It lasts until the robot arrives, so to act during a motion, start a second sequence. A target outside a joint's limits is refused before the sequence starts. After it completes, the robot is left in trajectory command mode.
 - wait (seconds). noop does nothing, such as to anchor timing with at.
 - wait_until (name and condition, or watch; timeout_s), stop_when (name and condition, or watch), end_stop_when (target): see waiting and stopping.
 Arguments are fixed when the sequence starts, except $scratchpad references, which are read when the step runs, so a step can use what an earlier step kept with store_result (see scratchpad). To act on a result otherwise, branch on it with only_if.
@@ -80,11 +79,11 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - stop_together: true on the call stops every other sequence still running at once when any one ends without completing (failed, timed out, stopped, or cancelled), before the ended one's on_stop runs. Each stopped one runs its own on_stop and has stopped_by with stop_together true and the sequence_id, label, state, and sequence_error of the one that ended. Use it when the sequences only make sense together, such as robots that move as one.
 - Anything that must interrupt a running sequence, such as an operator request, a fault, or a sensor limit, needs a stop_when in that sequence or the call's stop_when, with on_stop to make the device safe; checked only between sequences, it waits until the running step ends. Watch for it from the start of the sequence, so it covers every step that moves or acts, and without new_events_only, so a request sent between sequences still counts.
 - A sequence also stops at the first failed step unless that step has continue_on_error, and after max_duration_s, with state timed_out.
-- robotraconteur_cancel_sequence stops sequences at once, aborting a running generator and halting a robot moved by robot_move_joints. A function call that is still running, such as a motion called with wait true, stops being waited for, but the service finishes it. Work a service started from a call that returned at once, such as a motion started without waiting, is not stopped: stop it with the service's own command, such as in on_stop. A cancel from the model arrives a turn after the last result, often seconds later, so a stop at a set time or on something happening belongs in max_duration_s or stop_when.`,
+- robotraconteur_cancel_sequence stops sequences at once, aborting a running generator, such as a trajectory. A function call that is still running, such as a motion called with wait true, stops being waited for, but the service finishes it. Work a service started from a call that returned at once, such as a motion started without waiting, is not stopped: stop it with the service's own command, such as in on_stop. A cancel from the model arrives a turn after the last result, often seconds later, so a stop at a set time or on something happening belongs in max_duration_s or stop_when.`,
 
     on_stop: `on_stop, next to steps, lists steps to run at once if the sequence ends without completing: stopped by stop_when, the call's stop_when, or stop_together, cancelled, timed out, or failed. Use them to clean up, such as to stop a motion that a function started without waiting, or to say that the show stopped.
 - They run in order, each even if another fails, within 10 seconds in all, at most 20 steps.
-- They cannot wait: no wait, wait_until, stop_when, end_stop_when, or robot_move_joints, and no at_s, after, at, max_late, max_late_s, or repeat.
+- They cannot wait: no wait, wait_until, stop_when, end_stop_when, or generator_next, and no at_s, after, at, max_late, max_late_s, or repeat.
 - Their results are given in on_stop. The sequence's state and ended are set before they run, so while one is still running, status gives it in on_stop_running, and wait_s waits for them to finish.
 - Their only_if can query the labels of the main steps and of earlier on_stop steps, such as { "halt.ok": false } to run a fallback only if the on_stop step labelled halt failed.
 - Their only_if can also query _sequence, how the sequence ended: { state, stopped_by, error }, with state stopped, cancelled, timed_out, or failed, such as { "_sequence.state": "cancelled" } or { "_sequence.stopped_by.label": "stop" }. stopped_by is there only when the sequence was stopped by a condition or stop_together, and error only after a timeout or a failure, so after a cancel neither is, and $exists tells them apart, such as { "_sequence.stopped_by": { "$exists": false } }. A step without only_if runs however it ended.`,
@@ -105,11 +104,10 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - In value, arguments, generator_inputs, or joint_position, { "$scratchpad": "path" } stands for a kept value, read when the step runs. The path is a key, optionally with fields and indexes, such as pose.joint_position or wp[2]. It can be a whole argument, or one field of a structure given in JSON.
 - Before the sequences start, a path must use a key that already exists or that a step of the call stores. A key stored by another sequence of the call may not be there yet when the step runs, and the step then fails.
 - Keys are shared by every sequence and tool call. Use different keys for sequences that run at the same time.
-Capture an image and pass it to a detector, then move to a pose kept earlier:
+Capture an image and pass it to a detector:
 { "sequences": [{ "steps": [
     { "action": "call_function", "service": "camera", "name": "capture_frame", "store_result": "img" },
-    { "action": "call_function", "service": "detector", "name": "detect", "arguments": [{ "$scratchpad": "img" }], "store_result": "found" },
-    { "action": "robot_move_joints", "service": "robot", "joint_position": { "$scratchpad": "home.joint_position" }, "duration_s": 3 } ] }] }`,
+    { "action": "call_function", "service": "detector", "name": "detect", "arguments": [{ "$scratchpad": "img" }], "store_result": "found" } ] }] }`,
 
     examples: `Two robots started together, where a stop message halts one while the other goes on:
 { "sequences": [
@@ -132,7 +130,7 @@ An industrial robot motion that stops at once on a protective or emergency stop,
     { "action": "stop_when", "label": "stop", "watch": [
         { "key": "fault", "name": "robot_state", "condition": { "controller_state.name": { "$in": ["guard_stop", "emergency_stop"] } } },
         { "key": "operator", "service": "cell.panel", "name": "stop_pressed", "condition": {} } ] },
-    { "action": "robot_move_joints", "joint_position": [0.5, 0, 0, 0, 0.3, 0], "duration_s": 4 },
+    { "action": "call_function", "name": "execute_trajectory", "arguments": [{ "$scratchpad": "traj" }] },
     { "action": "call_function", "name": "start_process", "arguments": [] },
     { "action": "wait", "seconds": 10 } ],
   "on_stop": [

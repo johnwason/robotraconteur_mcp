@@ -163,6 +163,11 @@ const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "at", "max_late", "max_late_s", "only_if", "repeat", "continue_on_error"];
 
+/** Actions the model is not offered, though the server still has them */
+const HIDDEN_ACTIONS: SequenceAction[] = ["robot_move_joints"];
+/** The actions the model is offered */
+export const OFFERED_ACTIONS = SEQUENCE_ACTIONS.filter((a) => !HIDDEN_ACTIONS.includes(a)) as [SequenceAction, ...SequenceAction[]];
+
 /** Actions on_stop cannot use, since they wait, and fields it cannot use, since they schedule */
 const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints", "generator_next"];
 const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "at", "max_late", "max_late_s", "repeat", "continue_on_error"];
@@ -780,7 +785,7 @@ export class SequenceRunner
 
     private async check(step: SequenceStep, max_duration_s: number, pending: ReadonlySet<string> = new Set()): Promise<void>
     {
-        if (!SEQUENCE_ACTIONS.includes(step.action)) throw new Error(`Unknown action "${String(step.action)}". Use one of: ${SEQUENCE_ACTIONS.join(", ")}.`);
+        if (!OFFERED_ACTIONS.includes(step.action)) throw new Error(`Unknown action "${String(step.action)}". Use one of: ${OFFERED_ACTIONS.join(", ")}.`);
         const unused = Object.keys(step).filter((k) => step[k as keyof SequenceStep] !== undefined && !COMMON_FIELDS.includes(k as keyof SequenceStep) && !ACTION_FIELDS[step.action].includes(k as keyof SequenceStep));
         if (unused.length > 0) throw new Error(`The ${step.action} action does not use ${unused.join(", ")}. It uses: ${ACTION_FIELDS[step.action].join(", ")}.`);
         if (step.at_s !== undefined && !(step.at_s >= 0 && step.at_s < max_duration_s)) throw new Error(`at_s ${step.at_s} must be at least 0 and less than max_duration_s, ${max_duration_s}.`);

@@ -17,7 +17,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 import { errorText } from "./errors.js";
 import { loadConfig, ServiceRegistry } from "./registry.js";
-import { SEQUENCE_ACTIONS, SEQUENCE_LIMITS, SequenceRunner } from "./sequence.js";
+import { OFFERED_ACTIONS, SEQUENCE_LIMITS, SequenceRunner } from "./sequence.js";
 import type { CallStopWhen, SequenceSpec } from "./sequence.js";
 import { help, HELP_CATEGORIES } from "./help.js";
 import { HELP_TOPIC_SUMMARIES, HELP_TOPICS } from "./sequence_help.js";
@@ -42,8 +42,6 @@ const service = z.string().describe("Name of the service, as listed by robotraco
 const object = z.string().optional().describe("Path to a sub object, such as arm or arm.tool[0]. Leave unset for the root object");
 const name = (kind: string) => z.string().describe(`Name of the ${kind}, as listed by robotraconteur_describe`);
 const store_result = z.string().optional().describe("Keep the result under this key in robotraconteur_scratchpad");
-const ref = z.strictObject({ $scratchpad: z.string() });
-const joint_position = z.union([z.array(z.number()), ref]);
 
 const watch_entry = z.strictObject({
     key: z.string().optional().describe("The name combine uses for this entry. Defaults to name; keys must differ"),
@@ -66,7 +64,7 @@ const call_stop_when = z.strictObject({
 });
 
 const step = z.strictObject({
-    action: z.enum(SEQUENCE_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name. wait takes seconds; wait_until takes name and condition, or watch, and timeout_s; stop_when takes the same without timeout_s; end_stop_when takes target. robotraconteur_help topic: actions"),
+    action: z.enum(OFFERED_ACTIONS).describe("What the step does. Each action takes the arguments of the tool of the same name. wait takes seconds; wait_until takes name and condition, or watch, and timeout_s; stop_when takes the same without timeout_s; end_stop_when takes target. robotraconteur_help topic: actions"),
     label: z.string().optional().describe("A name for the step, shown in its results, and used by after, only_if, until, and end_stop_when"),
     service: z.string().optional().describe("The service. Defaults to the sequence's service"),
     object: z.string().optional().describe("Path to a sub object. Leave unset for the root object"),
@@ -75,8 +73,6 @@ const step = z.strictObject({
     arguments: z.unknown().optional().describe("For call_function, an array of arguments or an object keyed by parameter name"),
     generator_inputs: z.array(z.unknown()).optional().describe("For call_function of a generator that takes a value at each step"),
     timeout_s: z.number().positive().optional().describe("For wait_until, how long to wait before the step fails. For a generator call_function, abort after this long, default 60"),
-    joint_position: joint_position.optional().describe("For robot_move_joints, the target position of every joint"),
-    duration_s: z.number().positive().max(100).optional().describe("For robot_move_joints, how long the motion takes in seconds"),
     seconds: z.number().min(0).optional().describe("For wait, how long to wait"),
     condition: z.record(z.string(), z.unknown()).optional().describe("For wait_until and stop_when, a MongoDB query on the JSON the read tools show, such as { \"joint_position.0\": { \"$gte\": 0.29 } }, { \"value\": { \"$gt\": 0.5 } } for a number, or {} for any event of that name. An event is matched by its arguments by parameter name, such as { \"message\": \"stop\" }, not by the time, event, and arguments that read_events shows. For text in any case, use $expr with $toLower, such as { \"$expr\": { \"$eq\": [{ \"$toLower\": \"$message\" }, \"stop\"] } }. Enums, 64-bit integers, and allowed operators: robotraconteur_help topic conditions"),
     watch: z.array(watch_entry).min(1).max(10).optional().describe("For wait_until and stop_when, several things to watch in place of name and condition; any one met ends the step unless combine says otherwise. robotraconteur_help topic: waiting"),
@@ -176,16 +172,6 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
         })
     }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name, a.store_result)));
 
-    server.registerTool("robotraconteur_robot_move_joints", {
-        description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position. Refused if a target is outside its joint limits or robot_state is not updating. On success the robot is left in trajectory command mode; on a failure, stop, or timeout (duration_s + 30 s) it is halted. " + PARALLEL_NOTE,
-        inputSchema: z.object({
-            service,
-            object,
-            joint_position: joint_position.describe("The target position of every joint, in order"),
-            duration_s: z.number().positive().max(100).describe("How long the motion should take, in seconds. The maximum is 100")
-        })
-    }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
-
     server.registerTool("robotraconteur_scratchpad", {
         description: "Values kept in this server, so large data such as images can pass between services without going through you. store_result keeps a result, returning it if small, else a summary. A result too large to return is kept as _auto_N. In any value or argument, { \"$scratchpad\": \"path\" } uses a kept value; path is a key with any fields and indexes, such as state.joint_position[2]. set writes value at path; a $scratchpad value copies.",
         inputSchema: z.object({
@@ -259,7 +245,7 @@ standard_service_types: lists the standard service definitions that robots, came
     }, (a) => respond(() => a.sequence_id === undefined ? sequences.list(a.limit ?? 10) : sequences.status(a.sequence_id, a.from_index ?? 0, a.wait_s ?? 0, a.detail ?? "compact", a.until)));
 
     server.registerTool("robotraconteur_cancel_sequence", {
-        description: "Stop running sequences, given by sequence_ids, such as all those of one start call, at once. A cancel from the model arrives one turn after the last result, often seconds later, so to stop at a set time or on something happening, use max_duration_s or a stop_when step instead. A generator it is running, such as a trajectory, is aborted on the service, and a robot moved by robot_move_joints is also halted. It does not stop work that a service started from an ordinary function call that returned at once, such as a motion started without waiting for it, so stop that with the service's own command, such as in on_stop. An ordinary function call that is still running, such as a motion called with wait true, is not interrupted either: the sequence stops at once, but the service goes on until the call returns. Returns the sequence's final state and results, stopped, which says whether a step was stopped or the sequence was between steps, and not_run, how many step runs never started. If the sequence had already finished, cancel says so, and nothing is cancelled.",
+        description: "Stop running sequences, given by sequence_ids, such as all those of one start call, at once. A cancel from the model arrives one turn after the last result, often seconds later, so to stop at a set time or on something happening, use max_duration_s or a stop_when step instead. A generator it is running, such as a trajectory, is aborted on the service. It does not stop work that a service started from an ordinary function call that returned at once, such as a motion started without waiting for it, so stop that with the service's own command, such as in on_stop. An ordinary function call that is still running, such as a motion called with wait true, is not interrupted either: the sequence stops at once, but the service goes on until the call returns. Returns the sequence's final state and results, stopped, which says whether a step was stopped or the sequence was between steps, and not_run, how many step runs never started. If the sequence had already finished, cancel says so, and nothing is cancelled.",
         inputSchema: z.object({ sequence_ids: z.array(z.string()).min(1).max(50).describe("The sequences to stop, from robotraconteur_start_sequence. The result gives each in order, in sequences") })
     }, (a) => respond(() => sequences.cancelMany(a.sequence_ids)));
 

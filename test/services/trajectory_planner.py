@@ -35,6 +35,11 @@ object TrajectoryPlanner
     ## duration is rounded to a whole number of waypoint periods. Pass the result to the robot's
     ## execute_trajectory in trajectory command mode
     function JointTrajectory plan_trajectory(double[] current_position, double duration)
+    ## Plan a smooth move from current_position to target_position, the robot's joint positions in
+    ## radians, taking duration seconds, starting and ending at rest. The target must be within the
+    ## joint limits, and the move slow enough for the joint velocity limits. Pass the result to the
+    ## robot's execute_trajectory in trajectory command mode
+    function JointTrajectory plan_move(double[] current_position, double[] target_position, double duration)
 end
 """
 
@@ -58,6 +63,53 @@ class TrajectoryPlannerImpl:
         self._traj_type = RRN.GetStructureType("com.robotraconteur.robotics.trajectory.JointTrajectory")
         self._waypoint_type = RRN.GetStructureType("com.robotraconteur.robotics.trajectory.JointTrajectoryWaypoint")
         self._radian = RRN.GetConstants("com.robotraconteur.robotics.joints")["JointPositionUnits"]["radian"]
+
+    def _trajectory(self, positions, velocities, times):
+        traj = self._traj_type()
+        traj.joint_names = list(self._joint_names)
+        traj.joint_units = [self._radian] * len(self._joint_names)
+        traj.waypoints = []
+        for q, v, t in zip(positions, velocities, times):
+            wp = self._waypoint_type()
+            wp.joint_position = q
+            wp.joint_velocity = v
+            wp.position_tolerance = np.zeros((0,))
+            wp.velocity_tolerance = np.zeros((0,))
+            wp.time_from_start = t
+            traj.waypoints.append(wp)
+        return traj
+
+    def _check_position(self, q, name):
+        n_joints = len(self._joint_names)
+        if len(q) != n_joints:
+            raise RR.InvalidArgumentException(f"{name} must have {n_joints} joints, not {len(q)}")
+        for i in range(n_joints):
+            if not (self._lower[i] <= q[i] <= self._upper[i]):
+                raise RR.InvalidArgumentException(f"{name} joint {i} ({self._joint_names[i]}) is {q[i]}, outside its limits of {self._lower[i]} to {self._upper[i]}")
+
+    def plan_move(self, current_position, target_position, duration):
+        q0 = np.asarray(current_position, dtype=np.float64).flatten()
+        q1 = np.asarray(target_position, dtype=np.float64).flatten()
+        self._check_position(q0, "current_position")
+        self._check_position(q1, "target_position")
+        if not np.isfinite(duration) or duration <= 0 or duration > _MAX_DURATION:
+            raise RR.InvalidArgumentException(f"duration must be greater than zero and at most {_MAX_DURATION} seconds")
+        n_periods = max(4, int(np.ceil(duration / _WAYPOINT_PERIOD)))
+        total_time = n_periods * _WAYPOINT_PERIOD
+        # blend = (1 - cos(pi t / T)) / 2, which starts and ends at rest, with peak velocity pi / (2 T) times the distance
+        delta = q1 - q0
+        peak = np.abs(delta) * np.pi / (2 * total_time)
+        too_fast = np.nonzero(peak > self._vel_max)[0]
+        if len(too_fast) > 0:
+            i = int(too_fast[0])
+            needed = np.abs(delta[i]) * np.pi / (2 * self._vel_max[i])
+            raise RR.InvalidArgumentException(f"joint {i} ({self._joint_names[i]}) would move at {peak[i]:.3f} rad/s, over its limit of {self._vel_max[i]:.3f}. Use a duration of at least {needed:.2f} seconds")
+        times = [i * _WAYPOINT_PERIOD for i in range(n_periods + 1)]
+        positions = [q0 + delta * (1 - np.cos(np.pi * t / total_time)) / 2 for t in times]
+        velocities = [delta * np.pi / (2 * total_time) * np.sin(np.pi * t / total_time) for t in times]
+        positions[-1] = np.copy(q1)
+        velocities[-1] = np.zeros(len(q0))
+        return self._trajectory(positions, velocities, times)
 
     def plan_trajectory(self, current_position, duration):
         q0 = np.asarray(current_position, dtype=np.float64).flatten()
