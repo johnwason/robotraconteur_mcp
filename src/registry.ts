@@ -351,7 +351,8 @@ export class ServiceRegistry
             service.events = service.events.filter((e) => !taken.has(e));
             service.droppedEvents = 0;
         }
-        return { events, remaining: matching.length - (clear ? events.length : 0), dropped };
+        // The events after those returned, whether or not these were removed
+        return { events, remaining: matching.length - events.length, dropped };
     }
 
     /** Describe known services as JSON */

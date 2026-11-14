@@ -9,6 +9,9 @@ import time
 import numpy as np
 import RobotRaconteur as RR
 import RobotRaconteurCompanion as RRC
+import general_robotics_toolbox as rox
+from RobotRaconteurCompanion.Util.GeometryUtil import GeometryUtil
+from RobotRaconteurCompanion.Util.RobotUtil import RobotUtil
 from robotraconteur_abstract_robot import AbstractRobot
 
 RRN = RR.RobotRaconteurNode.s
@@ -24,6 +27,9 @@ class LoopbackRobot(AbstractRobot):
         self._base_set_controller_state = True
         self._base_set_operational_mode = True
         self._simulated_position = np.zeros((6,))
+        # The kinematics from robot_info, so that the endpoint pose follows the joints
+        self._rox_robot = RobotUtil(node=RRN).robot_info_to_rox_robot(robot_info, 0)
+        self._geom = GeometryUtil(node=RRN)
 
     def _run_timestep(self, now):
         stamp = self._stopwatch_ellapsed_s()
@@ -33,9 +39,8 @@ class LoopbackRobot(AbstractRobot):
         self._enabled = True
         self._ready = True
         self._joint_position = np.copy(self._simulated_position)
-        pose = np.zeros((1,), dtype=self._pose_dtype)
-        pose[0]["orientation"]["w"] = 1.0
-        self._endpoint_pose = pose
+        # One pose per chain, each a one-element array, as the abstract robot's tool transform expects
+        self._endpoint_pose = [self._geom.rox_transform_to_pose(rox.fwdkin(self._rox_robot, self._joint_position)).reshape((1,))]
         super()._run_timestep(now)
 
     def _send_robot_command(self, now, joint_pos_cmd, joint_vel_cmd):
@@ -57,6 +62,9 @@ def main():
     parser.add_argument("--nodename", default="loopback_robot")
     parser.add_argument("--port", type=int, default=52700)
     parser.add_argument("--attributes", default="{}")
+    # Stop the driver's update loop after this many seconds, so its wires stop updating while its
+    # properties still answer, as a driver whose loop has died does
+    parser.add_argument("--freeze-after", type=float, default=None)
     args, _ = parser.parse_known_args()
 
     RRC.RegisterStdRobDefServiceTypes(RRN)
@@ -72,6 +80,9 @@ def main():
         attributes = {k: RR.VarValue(v, "string") for k, v in json.loads(args.attributes).items()}
         context.SetServiceAttributes(attributes)
         print(f"PORT {args.port}", flush=True)
+        if args.freeze_after is not None:
+            time.sleep(args.freeze_after)
+            robot._keep_going = False
         sys.stdin.read()
         robot._close()
 

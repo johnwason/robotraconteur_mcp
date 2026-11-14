@@ -47,6 +47,28 @@ function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinit
     throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use robotraconteur_describe to list its members.`);
 }
 
+/**
+ * A wire value whose sequence number has stayed the same for this many seconds has stopped updating.
+ * Robot Raconteur gives the time a wire was read, not when its value last changed, so the sequence
+ * number of a standard state, such as robot_state, is the only sign that a device has stopped sending
+ */
+export const NOT_UPDATING_S = 5;
+/** How long robot_move_joints waits for robot_state to update before refusing to move */
+const ROBOT_STATE_CHECK_S = 1;
+
+/**
+ * The sequence number of a standard state structure, which advances with every new value: seqno,
+ * device_seqno of a DeviceTime, or data_header.seqno of sensor data. Undefined for other values
+ */
+function seqnoOf(value: unknown): string | undefined
+{
+    if (typeof value !== "object" || value === null) return undefined;
+    const v = value as Record<string, unknown>;
+    const header = v.data_header as Record<string, unknown> | null | undefined;
+    const seqno = v.seqno ?? v.device_seqno ?? header?.seqno;
+    return typeof seqno === "bigint" || typeof seqno === "number" ? String(seqno) : undefined;
+}
+
 /** The parts of a standard robot's robot_info that robot_move_joints uses */
 interface RobotInfo
 {
@@ -117,6 +139,8 @@ function sleep(ms: number): Promise<void>
 export class BridgeTools
 {
     private moving = new Set<string>();
+    /** The last sequence number seen on each wire, and since when, by service, object, and wire */
+    private seqnos = new Map<string, { seqno: string; since: number }>();
 
     constructor(private registry: ServiceRegistry) {}
 
@@ -329,12 +353,36 @@ export class BridgeTools
         return new Date(Number(t.seconds) * 1000 + t.nanoseconds / 1e6).toISOString();
     }
 
+    /**
+     * Note a wire value's sequence number, and say how long it has stayed the same over the reads of
+     * this server, or undefined if the value has none. The first read of a value gives 0
+     */
+    private unchangedFor(service: string, object: string | undefined, name: string, value: unknown): { seqno: string; since: number; seconds: number } | undefined
+    {
+        const seqno = seqnoOf(value);
+        if (seqno === undefined) return undefined;
+        const key = `${this.registry.fullServiceName(service)}/${object ?? ""}/${name}`;
+        const now = Date.now();
+        let seen = this.seqnos.get(key);
+        if (seen?.seqno !== seqno) this.seqnos.set(key, seen = { seqno, since: now });
+        return { seqno, since: seen.since, seconds: (now - seen.since) / 1000 };
+    }
+
+    /** The message for a wire whose sequence number has stopped changing */
+    private notUpdating(name: string, u: { seqno: string; since: number; seconds: number }): string
+    {
+        return `${name} has not updated for ${Math.round(u.seconds)} seconds: its seqno has stayed at ${u.seqno} since ${new Date(u.since).toISOString()}. The device may have stopped sending new values, such as a driver that is no longer running, so this value is out of date.`;
+    }
+
     async readWire(service: string, object: string | undefined, name: string): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire"]);
         const { value, timestamp } = await stub.peekWireInValue(name);
-        return { value: encode(stub, value, m.type), timestamp: this.timestamp(timestamp) };
+        const out: Record<string, unknown> = { value: encode(stub, value, m.type), read_at: this.timestamp(timestamp) };
+        const unchanged = this.unchangedFor(service, object, name, value);
+        if (unchanged && unchanged.seconds >= NOT_UPDATING_S) out.not_updating = this.notUpdating(name, unchanged);
+        return out;
     }
 
     /** Whether a member is a wire, property, or event, for wait_until. Events are only collected on the root object */
@@ -379,6 +427,9 @@ export class BridgeTools
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire", "property"]);
         const value = m.kind === "wire" ? (await stub.peekWireInValue(name)).value : await stub.getProperty(name);
+        // A watched wire that has stopped updating cannot meet or keep a condition, so it is an error
+        const unchanged = m.kind === "wire" ? this.unchangedFor(service, object, name, value) : undefined;
+        if (unchanged && unchanged.seconds >= NOT_UPDATING_S) throw new Error(this.notUpdating(name, unchanged));
         return encode(stub, value, m.type);
     }
 
@@ -401,7 +452,8 @@ export class BridgeTools
         // now is from the same clock as the events' times, so the model can tell how long they have waited
         const out: Record<string, unknown> = { events, remaining, now: new Date().toISOString() };
         if (dropped > 0) out.dropped = dropped;
-        if (remaining > 0) out.note = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting. Call again to get ${remaining === 1 ? "it" : "them"}.`;
+        const more = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting`;
+        if (remaining > 0) out.note = clear ? `${more}. Call again to get ${remaining === 1 ? "it" : "them"}.` : `${more} after these. Since clear is false, calling again returns these first, so call with clear true to reach ${remaining === 1 ? "it" : "them"}.`;
         return out;
     }
 
@@ -428,7 +480,18 @@ export class BridgeTools
         const stub = await this.registry.resolve(service, object);
         robotMember(stub);
 
-        const state = async () => (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array };
+        const state = async () => (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array; seqno: bigint };
+        // A robot whose state has stopped updating would never be seen to arrive, so it is not moved
+        const first = await state();
+        if (seqnoOf(first) !== undefined)
+        {
+            const deadline = Date.now() + ROBOT_STATE_CHECK_S * 1000;
+            while (seqnoOf(await state()) === seqnoOf(first))
+            {
+                if (Date.now() > deadline) throw new Error(`robot_state has not updated for ${ROBOT_STATE_CHECK_S} second: its seqno stayed at ${seqnoOf(first)}. The robot's driver may have stopped, so the robot was not moved.`);
+                await sleep(50);
+            }
+        }
         const start = Array.from((await state()).joint_position);
         if (target.length !== start.length) throw new Error(`The robot has ${start.length} joints but ${target.length} positions were given.`);
 

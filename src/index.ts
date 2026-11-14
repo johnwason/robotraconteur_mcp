@@ -141,7 +141,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_read_wire", {
-        description: "Read the latest value of a wire. Wires carry continuously updated data such as robot state and sensor readings.",
+        description: "Read the latest value of a wire. Wires carry continuously updated data such as robot state and sensor readings. read_at is when it was read, not when the device last updated it. not_updating appears when a standard state's seqno has not changed for 5 s: the device stopped sending.",
         inputSchema: z.object({ service, object, name: name("wire") }),
         annotations: { readOnlyHint: true }
     }, ({ service: s, object: o, name: n }) => respond(() => tools.readWire(s, o, n)));
@@ -162,7 +162,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name)));
 
     server.registerTool("robotraconteur_robot_move_joints", {
-        description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position. A target outside a joint's limits in robot_info is refused before the robot moves. After the motion completes, the robot is left in trajectory command mode; if it fails or is stopped, the robot is halted. " + PARALLEL_NOTE,
+        description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position. Refused if a target is outside its joint limits or robot_state is not updating. On success the robot is left in trajectory command mode; on a failure, stop, or timeout (duration_s + 30 s) it is halted. " + PARALLEL_NOTE,
         inputSchema: z.object({
             service,
             object,

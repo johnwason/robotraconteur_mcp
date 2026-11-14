@@ -219,6 +219,7 @@ test("refusals give their values and say the sequence was not started", async ()
     const { runner: r } = runner();
     await assert.rejects(r.start([{ steps: [call("quick", { at_s: 3, max_late_s: 2 })] }] as SequenceSpec[]), /max_late_s 2 is before the step's at_s 3\. It must be at least at_s\. The sequence was not started\./);
     await assert.rejects(r.start([{ max_duration_s: 10, steps: [call("quick", { at_s: 3, max_late_s: 12 })] }] as SequenceSpec[]), /max_late_s 12 must be less than max_duration_s, 10\. The sequence was not started\./);
+    await assert.rejects(r.start([{ max_duration_s: 10, steps: [call("quick", { at_s: 12 })] }] as SequenceSpec[]), /at_s 12 must be at least 0 and less than max_duration_s, 10\./);
     const many = Array.from({ length: 6 }, () => call("quick", { repeat: { count: 400, every_s: 0.01 } }));
     await assert.rejects(r.start([{ max_duration_s: 100, steps: many }] as SequenceSpec[]), /are allowed\. The sequence was not started\./);
 });

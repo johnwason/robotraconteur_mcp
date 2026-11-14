@@ -173,7 +173,7 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         // The tool list is loaded on every turn, so the detailed sequence rules are in robotraconteur_help
         const size = (name: string) => JSON.stringify(tools.find((t) => t.name === name)).length;
         assert.ok(size("robotraconteur_start_sequence") < 13000, `start_sequence is ${size("robotraconteur_start_sequence")} characters`);
-        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 28000, "the whole tool list");
+        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 28000, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
     });
 
     test("sequence help gives the rules by topic", async () =>
@@ -243,6 +243,53 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("a service name shared by several nodes is rejected, listing them", async () =>
     {
         await fails(bridge, "robotraconteur_describe", { service: "robot" }, /"robot" matches more than one service: robot_a\.robot, robot_b\.robot/);
+    });
+
+    test("the test robot keeps updating with a tool attached, and its endpoint follows the tool", async () =>
+    {
+        const service = "robot_b.robot";
+        const before = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value;
+        const tcp = { rotation: { w: 1, x: 0, y: 0, z: 0 }, translation: { x: 0, y: 0, z: 0.1 } };
+        await ok(bridge, "robotraconteur_call_function", { service, name: "tool_attached", arguments: [0, { tcp }] });
+        try
+        {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const after = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value;
+            assert.ok(BigInt(after.seqno) > BigInt(before.seqno), "robot_state still updates");
+            const moved = Math.hypot(...["x", "y", "z"].map((k) => after.kin_chain_tcp[0].position[k] - before.kin_chain_tcp[0].position[k]));
+            assert.ok(Math.abs(moved - 0.1) < 1e-6, `the endpoint moved ${moved} with the tool`);
+        }
+        finally
+        {
+            await ok(bridge, "robotraconteur_call_function", { service, name: "tool_detached", arguments: [0, ""] });
+        }
+    });
+
+    test("a robot whose state stopped updating is reported, not moved, and stops a sequence watching it", { timeout: 60000 }, async () =>
+    {
+        start("python3", ["test/services/loopback_robot.py", "--nodename", "robot_frozen", "--port", "52704", "--freeze-after", "0.5"]);
+        await waitForPort(52704);
+        const service = "robot_frozen.robot";
+        await discover(bridge, [service]);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const first = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" });
+        assert.ok(first.read_at, "the read gives when it was read");
+        assert.equal(first.not_updating, undefined, "one read cannot tell");
+        // Properties still answer, as with a driver whose loop died
+        assert.equal((await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" })).value.name, "halt");
+        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0.1, 0, 0, 0, 0, 0], duration_s: 1 }, /robot_state has not updated for 1 second: its seqno stayed at \d+\. The robot's driver may have stopped, so the robot was not moved\./);
+
+        // A stop_when on a fault would never fire on a frozen state, so the sequence stops instead
+        const report = await startSeq({ service, wait_s: 15, steps: [
+            { action: "stop_when", name: "robot_state", condition: { "controller_state.name": "emergency_stop" }, label: "fault" },
+            { action: "wait", seconds: 20 }] });
+        assert.equal(report.state, "stopped", JSON.stringify(report));
+        assert.match(report.stopped_by.error, /robot_state has not updated for 5 seconds: its seqno has stayed at \d+ since/);
+        assert.ok(report.elapsed_s < 7, String(report.elapsed_s));
+        const later = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" });
+        assert.equal(later.value.seqno, first.value.seqno);
+        assert.match(later.not_updating, /has not updated for \d+ seconds/);
+        await ok(bridge, "robotraconteur_read_wire", { service: "robot_a.robot", name: "robot_state" }).then((r) => assert.equal(r.not_updating, undefined, "a running robot is not flagged"));
     });
 
     test("a service that goes away keeps its name and is explained", { timeout: 150000 }, async () =>
@@ -1524,6 +1571,15 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
         // The test service fires each event from its own timer, so they can arrive in any order. The
         // reads take them oldest first, two then one
+        // Without clear, remaining counts only the events after those returned
+        const peeked = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", limit: 2, clear: false });
+        assert.equal(peeked.events.length, 2);
+        assert.equal(peeked.remaining, 1);
+        assert.match(peeked.note, /call with clear true/);
+        const peeked_all = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", clear: false });
+        assert.equal(peeked_all.events.length, 3);
+        assert.equal(peeked_all.remaining, 0);
+        assert.equal(peeked_all.note, undefined);
         const first = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", limit: 2 });
         assert.equal(first.events.length, 2);
         assert.equal(first.remaining, 1);
