@@ -601,7 +601,9 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         // robot_state can be a tick behind the complete status
         await new Promise((resolve) => setTimeout(resolve, 200));
         const arrived = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
-        assert.ok(Math.abs(arrived[0] - 0.3) < 1e-3, String(arrived[0]));
+        // The released abstract robot never sends the last setpoint, so a trajectory that ends moving
+        // stops up to one control cycle short: 0.001 rad at this speed
+        assert.ok(Math.abs(arrived[0] - 0.3) < 2e-3, String(arrived[0]));
 
         // Back from 0.3 to 0, aborted partway
         trajectory.waypoints = waypoints.map((w) => ({ ...w, joint_position: [0.3 - w.joint_position[0]!, 0, 0, 0, 0, 0] }));

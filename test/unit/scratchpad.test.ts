@@ -104,6 +104,10 @@ test("a value from a service is read in parts, in the JSON the read tools show",
     const pad = withImage();
     assert.equal(pad.get("img.header.seqno").value, "7");
     assert.equal(pad.get("img.header.stamp[1]").value, 2);
+    // A negative index counts from the end
+    assert.equal(pad.get("img.header.stamp[-1]").value, 2);
+    assert.deepEqual(pad.get("img.waypoints[-2]").value, [0.1, 0.2]);
+    assert.throws(() => pad.get("img.data[-5]"), /img\.data has 4 elements, so img\.data\[-5\] is not in it/);
     assert.deepEqual(pad.get("img.spectrum[1]").value, { real: 3, imag: 4 });
     assert.equal(pad.get("img.mask[0]").value, true);
     assert.deepEqual(pad.get("img.grid.dims").value, [2, 2]);

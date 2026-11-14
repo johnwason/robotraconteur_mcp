@@ -333,8 +333,10 @@ export class Scratchpad
         const where = at.where + segmentText(s);
         if (Array.isArray(v))
         {
-            if (typeof s !== "number" || s < 0 || s >= v.length) throw new Error(`${at.where} is an array of ${v.length}, so ${where} is not in it.`);
-            return { value: v[s], where, assign: (x) => v[s] = x };
+            // A negative index counts from the end, so [-1] is the last element
+            const i = typeof s === "number" && s < 0 ? v.length + s : s;
+            if (typeof i !== "number" || i < 0 || i >= v.length) throw new Error(`${at.where} is an array of ${v.length}, so ${where} is not in it.`);
+            return { value: v[i], where, assign: (x) => v[i] = x };
         }
         if (typeof v === "object" && v !== null)
         {
@@ -352,10 +354,12 @@ export class Scratchpad
         const v = at.value;
         const where = at.where + segmentText(s);
         const child = (value: unknown, type: TypeDefinition, assign: (x: unknown) => void, childScope = scope): Located => ({ value, info: { type, types, scope: childScope }, assign, where });
+        // A negative index counts from the end, so [-1] is the last element
         const index = (length: number) =>
         {
-            if (typeof s !== "number" || s < 0 || s >= length) throw new Error(`${at.where} has ${length} elements, so ${where} is not in it.`);
-            return s;
+            const i = typeof s === "number" && s < 0 ? length + s : s;
+            if (typeof i !== "number" || i < 0 || i >= length) throw new Error(`${at.where} has ${length} elements, so ${where} is not in it.`);
+            return i;
         };
         if (v === null || v === undefined) throw new Error(`${at.where} is null, so it has no ${where}.`);
         if (t.container === "list")

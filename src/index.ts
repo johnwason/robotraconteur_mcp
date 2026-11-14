@@ -173,7 +173,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name, a.store_result)));
 
     server.registerTool("robotraconteur_scratchpad", {
-        description: "Values kept in this server, so large data such as images can pass between services without going through you. store_result keeps a result, returning it if small, else a summary. Every result is also kept, named in kept_as, such as _r17, until 20 newer ones replace it; a sequence keeps its last data result when it ends. In any value or argument, { \"$scratchpad\": \"path\" } uses a kept value; path is a key with any fields and indexes, such as state.joint_position[2]. set writes value at path; copy and rename keep a value under the key in to.",
+        description: "Values kept in this server, so large data such as images can pass between services without going through you. store_result keeps a result, returning it if small, else a summary. Every result value is also kept, named in kept_as, such as _r17, until 20 newer ones replace it; a sequence keeps its last data result when it ends. In any value or argument, { \"$scratchpad\": \"path\" } uses a kept value; path is a key with any fields and indexes, such as state.joint_position[2] or plan.waypoints[-1]. set writes value at path; copy and rename keep a value under the key in to.",
         inputSchema: z.object({
             action: z.enum(["list", "get", "set", "copy", "rename", "delete"]),
             path: z.string().optional().describe("A key, optionally with fields and indexes. For rename, a whole key"),
