@@ -399,7 +399,7 @@ export class Scratchpad
                 this.checkSize(change);
                 container[s] = json;
                 entry.bytes += change;
-        entry.time = Date.now();
+                entry.time = Date.now();
             }
             else if (container[s] === undefined || container[s] === null) container[s] = typeof next === "number" ? [] : {};
             parent = container[s];
