@@ -601,16 +601,23 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         generator = await run();
         const abort = new AbortController();
         const waiting = bridge.callTool({ name: "robotraconteur_generator", arguments: { generator, action: "next" } }, { signal: abort.signal, timeout: 30000 });
-        // The driver takes about a second to begin a trajectory
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        // The driver takes a varying time to begin a trajectory, so the cancel waits until it is moving
+        const deadline = Date.now() + 10000;
+        while ((await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0] > 0.25 && Date.now() < deadline)
+        {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
         abort.abort();
         await assert.rejects(waiting);
         await new Promise((resolve) => setTimeout(resolve, 300));
         const ended = await ok(bridge, "robotraconteur_generator", { generator, action: "next" });
         assert.equal(ended.done, true);
         assert.match(ended.ended, /aborted when its next was cancelled/);
+        await new Promise((resolve) => setTimeout(resolve, 300));
         const stopped = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
         assert.ok(stopped[0] > 0.02 && stopped[0] < 0.28, `stopped partway, at ${stopped[0]}`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        assert.deepEqual((await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position, stopped, "and stays stopped");
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
     });
 
