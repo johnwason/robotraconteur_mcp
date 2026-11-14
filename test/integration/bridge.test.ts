@@ -740,7 +740,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await failsStart({ steps: [{ action: "wait" }] }, /needs seconds/);
         await failsStart({ steps: [{ action: "robot_move_joints", service: "reynard", joint_position: [0], duration_s: 1 }] }, /needs a standard robot/);
         await failsStart({ steps: [{ action: "call_function", service: "reynard", name: "say", args: ["x"] }] }, /args/);
-        await failsStart({ steps: [{ action: "read_wire", service: "reynard", name: "state", repeat: { count: 1000, every_s: 1 } }] }, /longer than max_duration_s/);
+        await failsStart({ steps: [{ action: "read_wire", service: "reynard", name: "state", repeat: { count: 1000, every_s: 1 } }] }, /would start at 999 seconds, but runs must start before max_duration_s, 60\./);
         await failsStart({ steps: [say], max_duration_s: 10000 }, /max_duration_s/);
         assert.equal((await ok(bridge, "robotraconteur_sequence_status", {})).sequences.length, before, "no sequence was started");
     });

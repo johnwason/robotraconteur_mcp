@@ -49,6 +49,7 @@ class FakeTools
         this.calls.push(name);
         if (name === "quick") return { result: 1 };
         if (name === "fails") throw new Error("it failed");
+        if (name === "slow") return new Promise((resolve) => setTimeout(() => resolve({ result: 2 }), 400));
         const call = new Promise<Record<string, unknown>>((resolve) => this.release.set(name, () => resolve({ result: null })));
         return signal ? untilAborted(call, signal) : call;
     }
@@ -222,7 +223,8 @@ test("refusals give their values and say the sequence was not started", async ()
     await assert.rejects(r.start([{ max_duration_s: 10, steps: [call("quick", { at_s: 12 })] }] as SequenceSpec[]), /at_s 12 must be at least 0 and less than max_duration_s, 10\./);
     await assert.rejects(r.start([{ max_duration_s: 1, steps: [{ action: "wait", seconds: 5 }] }] as SequenceSpec[]), /needs seconds from 0 up to max_duration_s, 1, but was given 5\./);
     await assert.rejects(r.start([{ max_duration_s: 1, steps: [{ action: "wait_until", service: "s", name: "w", condition: {}, timeout_s: 3 }] }] as SequenceSpec[]), /at most max_duration_s, 1, but was given 3\./);
-    await assert.rejects(r.start([{ max_duration_s: 1, steps: [call("quick", { repeat: { count: 4, every_s: 0.5 } })] }] as SequenceSpec[]), /The repeats would take 2 seconds, 4 times every 0\.5, longer than max_duration_s, 1\./);
+    await assert.rejects(r.start([{ max_duration_s: 1, steps: [call("quick", { repeat: { count: 3, every_s: 0.5 } })] }] as SequenceSpec[]), /The last of 3 runs every 0\.5 seconds would start at 1 seconds, but runs must start before max_duration_s, 1\./);
+    await assert.rejects(r.start([{ max_duration_s: 2, steps: [call("quick", { at_s: 1, repeat: { count: 3, every_s: 0.5 } })] }] as SequenceSpec[]), /would start at 2 seconds, counting from at_s 1/);
     const many = Array.from({ length: 6 }, () => call("quick", { repeat: { count: 400, every_s: 0.01 } }));
     await assert.rejects(r.start([{ max_duration_s: 100, steps: many }] as SequenceSpec[]), /are allowed\. The sequence was not started\./);
 });
@@ -235,4 +237,29 @@ test("a sequence that times out says so in whole sentences, with second for 1", 
     assert.equal(s.state, "timed_out");
     assert.equal(s.error, "The sequence ran longer than max_duration_s, 1 second.");
     assert.match(s.stopped, /which was stopped\.$/);
+});
+
+test("the last repeat may start just before max_duration_s", async () =>
+{
+    const { runner: r, tools } = runner();
+    const report = await r.start([{ max_duration_s: 1, steps: [call("quick", { repeat: { count: 4, every_s: 0.3 } })] }] as SequenceSpec[], 2, "full") as { sequences: Record<string, any>[] };
+    assert.equal(report.sequences[0]!.state, "completed", JSON.stringify(report.sequences[0]));
+    assert.equal(tools.calls.length, 4);
+});
+
+test("status shows an on_stop step still running, and wait_s waits for on_stop to finish", async () =>
+{
+    const { runner: r } = runner();
+    const started = await r.start([{ steps: [call("fails")], on_stop: [call("slow", { label: "cleanup" })] }] as SequenceSpec[]) as { sequences: { sequence_id: string }[] };
+    const id = started.sequences[0]!.sequence_id;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const during = await r.status(id) as Record<string, any>;
+    assert.equal(during.state, "failed");
+    assert.ok(during.ended, "the sequence has ended");
+    assert.deepEqual(during.on_stop, []);
+    assert.equal(during.on_stop_running.label, "cleanup");
+    assert.ok(during.on_stop_running.running_s >= 0.05, String(during.on_stop_running.running_s));
+    const after = await r.status(id, 0, 5) as Record<string, any>;
+    assert.equal(after.on_stop_running, undefined);
+    assert.deepEqual(after.on_stop.map((x: any) => x.result), [2], "wait_s waited for on_stop");
 });
