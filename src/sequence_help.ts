@@ -39,7 +39,7 @@ const HELP: Record<HelpTopic, string> = {
 - get_property (name), set_property (name, value), read_wire (name), write_wire (name, value).
 - call_function (name, arguments as an array or an object keyed by parameter name, and for a generator generator_inputs and timeout_s, default 60). Its result is the function's return value. A generator runs to its end, and its result is how it ran and its last results.
 - generator_next (generator, value if it takes one, store_result), generator_close and generator_abort (generator): act on a generator that robotraconteur_call_function started. A direct robotraconteur_generator next holds you until the service answers, which for a trajectory can be the whole motion. To follow a long operation without waiting on it:
-  1. Start it with robotraconteur_call_function, which returns a generator id.
+  1. Start it with robotraconteur_call_function, which returns a generator id. An operation such as a robot's execute_trajectory begins only at the first next, so time from that.
   2. Start a one-step generator_next sequence without wait_s. wait_s would hold the call until the next returns, as a direct next does.
   3. Do other work, such as reading the device's state wire.
   4. Check robotraconteur_sequence_status, or the step's store_result key. While the result has done false, go to 2; once done is true, stop.

@@ -441,7 +441,7 @@ export class BridgeTools
         const out: Record<string, unknown> = { generator: id };
         if (handle.paramType) out.takes = typeName(handle.paramType);
         if (handle.returnType) out.returns = typeName(handle.returnType);
-        out.note = `${name} is a generator. Call robotraconteur_generator next with this id for each result${handle.paramType ? ", giving value each time" : ""}, until done is true, or close or abort it.`;
+        out.note = `${name} is a generator. Call robotraconteur_generator next with this id for each result${handle.paramType ? ", giving value each time" : ""}, until done is true, or close or abort it. An operation such as a robot's execute_trajectory begins only at the first next.`;
         return out;
     }
 
