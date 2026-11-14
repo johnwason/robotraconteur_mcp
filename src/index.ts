@@ -178,7 +178,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_scratchpad", {
-        description: "Values kept in this server, so that large data such as images can go from one service to another without passing through you. store_result keeps a result, returning a summary. In place of any value or argument, { \"$scratchpad\": \"path\" } uses a kept value, where path is a key with any fields and indexes, such as img or state.joint_position[2]. set writes value at path; a $scratchpad value copies.",
+        description: "Values kept in this server, so that large data such as images can go from one service to another without passing through you. store_result keeps a result, returning it if small, else a summary. In place of any value or argument, { \"$scratchpad\": \"path\" } uses a kept value, where path is a key with any fields and indexes, such as img or state.joint_position[2]. set writes value at path; a $scratchpad value copies.",
         inputSchema: z.object({
             action: z.enum(["list", "get", "set", "delete"]),
             path: z.string().optional().describe("A key, optionally with fields and indexes"),

@@ -37,6 +37,8 @@ interface Entry
     /** Undefined for JSON written by the model */
     info?: ValueType;
     bytes: number;
+    /** When it was last written, in milliseconds since 1970 */
+    time: number;
 }
 
 /** One step of a path: a field or string map key, or an index or integer map key */
@@ -57,6 +59,8 @@ const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Results larger than this are returned with large arrays summarized, as the read tools do */
 const MAX_RESULT_BYTES = 64 * 1024;
 const PREVIEW_CHARS = 300;
+/** A stored value whose JSON is no longer than this is returned in full, so that reading it needs no second call */
+const FULL_VALUE_CHARS = 1024;
 
 /** Split a path such as img.data_header.ts, wp[2], or names["a b"] into its key and segments */
 export function parsePath(path: string): { key: string; segments: Segment[] }
@@ -103,6 +107,12 @@ export function estimateBytes(v: unknown): number
     if (Array.isArray(v)) return v.reduce((n: number, x) => n + estimateBytes(x), 32);
     if (typeof v === "object") return Object.entries(v).reduce((n, [k, x]) => n + 2 * k.length + estimateBytes(x), 32);
     return 8;
+}
+
+/** Seconds since an entry was last written, so that a value kept long ago is seen to be old */
+function age(e: Entry): number
+{
+    return Math.round((Date.now() - e.time) / 100) / 10;
 }
 
 /** A deep copy, so that changing one entry never changes another that was copied from it */
@@ -158,7 +168,7 @@ export class Scratchpad
         if (!old && this.entries.size >= SCRATCHPAD_LIMITS.maxKeys) throw new Error(`The scratchpad already has ${SCRATCHPAD_LIMITS.maxKeys} keys, its limit. Delete keys that are no longer needed.`);
         const bytes = estimateBytes(value);
         this.checkSize(bytes - (old?.bytes ?? 0));
-        this.entries.set(key, { value, info, bytes });
+        this.entries.set(key, { value, info, bytes, time: Date.now() });
         return this.summary(key);
     }
 
@@ -166,9 +176,16 @@ export class Scratchpad
     summary(key: string): Record<string, unknown>
     {
         const e = this.entries.get(key)!;
+        const out = { key, type: this.typeText(e.info), bytes: e.bytes };
+        // The bytes in memory are at least the size of the JSON, so a large value is never converted whole
+        if (e.bytes <= 8 * FULL_VALUE_CHARS)
+        {
+            const value = this.toJson(e.value, e.info);
+            if (JSON.stringify(value).length <= FULL_VALUE_CHARS) return { ...out, value };
+        }
         let preview = JSON.stringify(this.toJson(e.value, e.info, { maxArray: 8 }));
         if (preview.length > PREVIEW_CHARS) preview = preview.slice(0, PREVIEW_CHARS) + "…";
-        return { key, type: this.typeText(e.info), bytes: e.bytes, preview };
+        return { ...out, preview };
     }
 
     private typeText(info?: ValueType): string
@@ -188,7 +205,7 @@ export class Scratchpad
 
     list(): Record<string, unknown>
     {
-        const keys = [...this.entries].map(([key, e]) => ({ key, type: this.typeText(e.info), bytes: e.bytes }));
+        const keys = [...this.entries].map(([key, e]) => ({ key, type: this.typeText(e.info), bytes: e.bytes, age_s: age(e) }));
         return { keys, bytes: this.total(), max_bytes: SCRATCHPAD_LIMITS.maxBytes };
     }
 
@@ -315,7 +332,7 @@ export class Scratchpad
     get(path: string): Record<string, unknown>
     {
         const at = this.locate(path);
-        const out: Record<string, unknown> = { path, type: this.typeText(at.info) };
+        const out: Record<string, unknown> = { path, type: this.typeText(at.info), age_s: age(this.entries.get(parsePath(path).key)!) };
         if (estimateBytes(at.value) <= MAX_RESULT_BYTES)
         {
             const full = this.toJson(at.value, at.info);
@@ -357,6 +374,7 @@ export class Scratchpad
         this.checkSize(change);
         at.assign!(value);
         entry.bytes += change;
+        entry.time = Date.now();
     }
 
     /** Write into JSON written by the model, adding fields that are missing, and elements at the end of an array */
@@ -381,6 +399,7 @@ export class Scratchpad
                 this.checkSize(change);
                 container[s] = json;
                 entry.bytes += change;
+        entry.time = Date.now();
             }
             else if (container[s] === undefined || container[s] === null) container[s] = typeof next === "number" ? [] : {};
             parent = container[s];

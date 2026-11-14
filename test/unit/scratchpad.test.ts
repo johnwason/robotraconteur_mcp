@@ -129,7 +129,12 @@ test("a large value is summarized, and can be read in parts", () =>
     assert.equal(pad.list().keys instanceof Array, true);
     const summary = pad.summary("big");
     assert.equal(summary.type, "int32[]");
+    assert.equal(summary.value, undefined);
     assert.ok((summary.preview as string).length <= 301);
+    // A small value is returned whole, with no preview
+    const small = pad.store("small", Float64Array.of(0.1, 0.2), { type: t("double[]"), types, scope: camera });
+    assert.deepEqual(small.value, [0.1, 0.2]);
+    assert.equal(small.preview, undefined);
 });
 
 test("set converts JSON to the type of a field and changes it in place", () =>
@@ -211,6 +216,18 @@ test("in a check, a key that a step will store is accepted, and any other missin
     assert.throws(() => check.fromJson({ $scratchpad: "never" }, t("double"), camera, "value"), /value: there is no scratchpad key "never", and no step stores it/);
     // Without a resolver, a marker is an ordinary object
     assert.throws(() => new Codec(types).fromJson({ $scratchpad: "x" }, t("double"), camera), /expected a double/);
+});
+
+test("list and get give how long ago a key was written", async () =>
+{
+    const pad = withImage();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const listed = pad.list().keys as { key: string; age_s: number }[];
+    assert.ok(listed[0]!.age_s >= 0.2, String(listed[0]!.age_s));
+    assert.ok((pad.get("img.width").age_s as number) >= 0.2);
+    // Writing in place makes it new again
+    pad.set("img.width", 5);
+    assert.ok((pad.get("img").age_s as number) < 0.2);
 });
 
 test("keys and sizes are limited", () =>

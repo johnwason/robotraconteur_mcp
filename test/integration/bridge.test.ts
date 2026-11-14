@@ -1781,7 +1781,8 @@ describe("the scratchpad", { timeout: 300000 }, () =>
 
         // Read in part, and changed in place
         const width = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "img.width" });
-        assert.deepEqual(width, { path: "img.width", type: "uint32", value: N });
+        assert.deepEqual({ ...width, age_s: undefined }, { path: "img.width", type: "uint32", value: N, age_s: undefined });
+        assert.equal(typeof width.age_s, "number");
         const whole = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "img" });
         assert.equal(whole.value.data.truncated, true);
         await ok(bridge, "robotraconteur_scratchpad", { action: "set", path: "img.width", value: 2048 });
@@ -1813,6 +1814,8 @@ describe("the scratchpad", { timeout: 300000 }, () =>
     {
         const kept = await ok(bridge, "robotraconteur_get_property", { service: TEST_SERVICE, name: "i32_huge", store_result: "huge" });
         assert.equal(kept.stored.type, "int32[]");
+        assert.equal(kept.stored.value, undefined);
+        assert.match(kept.stored.preview, /"truncated":true/);
         const part = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "huge[2621439]" });
         assert.equal(typeof part.value, "number");
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "huge" });
@@ -1846,6 +1849,8 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         assert.equal(seq.state, "completed", JSON.stringify(seq));
         const result = (label: string) => seq.results.find((x: { label?: string }) => x.label === label).result;
         assert.equal(result("made").stored.type, "double[]{list}");
+        // Small enough to be returned whole, so no second call is needed to see it
+        assert.deepEqual(result("made").stored.value, waypoints);
         assert.equal(result("digest"), expected);
         assert.equal(result("streamed").stored.type, "double[]{list}");
         assert.equal(result("streamed").completed, true);
