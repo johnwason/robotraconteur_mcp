@@ -26,6 +26,7 @@ const ROOT = process.cwd();
 const TEST_SERVICE = "RobotRaconteurTestService";
 const ROBOT_TYPE = "com.robotraconteur.robotics.robot.Robot";
 const ROUNDTRIP = "roundtrip";
+const PLANNER = "planner";
 const processes: ChildProcess[] = [];
 
 function start(command: string, args: string[]): ChildProcess
@@ -156,8 +157,10 @@ before(async () =>
     start("python3", ["-u", "test/services/rr_test_server.py"]);
     start("python3", ["test/services/roundtrip_service.py"]);
     await waitForPort(52710);
+    start("python3", ["test/services/trajectory_planner.py"]);
+    await waitForPort(52720);
     bridge = await startBridge();
-    await discover(bridge, ["reynard", "reynard_diagnostics", "robot_a.robot", "robot_b.robot", TEST_SERVICE, ROUNDTRIP]);
+    await discover(bridge, ["reynard", "reynard_diagnostics", "robot_a.robot", "robot_b.robot", TEST_SERVICE, ROUNDTRIP, PLANNER]);
 }, { timeout: 180000 });
 
 after(async () =>
@@ -1944,6 +1947,57 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         const moved = await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: { $scratchpad: "home.joint_position" }, duration_s: 0.5 });
         moved.final_position.forEach((x: number, i: number) => assert.ok(Math.abs(x - [0.1, 0.1, 0.1, 0, 0, 0][i]!) < 1e-3, `joint ${i}: ${x}`));
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+    });
+
+    test("a long trajectory planned from the robot's position is executed from the scratchpad", { timeout: 90000 }, async () =>
+    {
+        const service = "robot_b.robot";
+        const start = [0.2, -0.1, 0.3, 0, 0.4, 0];
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: start, duration_s: 0.5 });
+        await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state", store_result: "here" });
+        // 20 s with waypoints every 50 ms, too large to return to the model
+        const planned = await ok(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_trajectory", arguments: [{ $scratchpad: "here.joint_position" }, 20], store_result: "traj" });
+        assert.equal(planned.stored.type, "com.robotraconteur.robotics.trajectory.JointTrajectory");
+        assert.ok(planned.stored.bytes > 64 * 1024, String(planned.stored.bytes));
+        assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "traj.waypoints[400].time_from_start" })).value, 20);
+
+        await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "halt" });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "trajectory" });
+        const { generator } = await ok(bridge, "robotraconteur_call_function", { service, name: "execute_trajectory", arguments: [{ $scratchpad: "traj" }] });
+        const t0 = Date.now();
+        let done = false;
+        const stepping = (async () =>
+        {
+            const statuses: any[] = [];
+            for (;;)
+            {
+                const r = await ok(bridge, "robotraconteur_generator", { generator, action: "next" });
+                if (r.done) break;
+                statuses.push(r.value);
+            }
+            done = true;
+            return statuses;
+        })();
+        // The joints swing away from the start and back while it runs
+        let farthest = 0;
+        while (!done)
+        {
+            const q = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
+            farthest = Math.max(farthest, ...q.map((x: number, i: number) => Math.abs(x - start[i]!)));
+            await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        const statuses = await stepping;
+        assert.ok(Date.now() - t0 > 19000, `took ${Date.now() - t0} ms`);
+        assert.equal(statuses[statuses.length - 1].action_status.name, "complete", JSON.stringify(statuses));
+        assert.ok(farthest > 0.2, `moved at most ${farthest}`);
+        const arrived = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
+        arrived.forEach((x: number, i: number) => assert.ok(Math.abs(x - start[i]!) < 1e-3, `joint ${i}: ${x}`));
+
+        await fails(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_trajectory", arguments: [[0, 0, 0], 5] }, /must have 6 joints/);
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "here" });
+        await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "traj" });
     });
 
     test("a sequence keeps waypoints and moves through them", async () =>

@@ -212,7 +212,7 @@ The tests and builds run inside an isolated podman container, on an internal net
 
 [GitHub Actions](.github/workflows/ci.yml) runs the same tests on every push and pull request, builds the bundle, and tests it. The bundle and its license file are kept as the `robotraconteur-mcp` artifact of each run.
 
-The tests drive the real server over stdio with the MCP client, against Reynard, two simulated robots using the standard Robot type, and Core's test service. Reynard runs as `test/services/instrumented_reynard.py`, which adds a `reynard_diagnostics` service to send chat messages as if typed in the web page and to log what Reynard is asked to do, so tests of chat and timing need no person. [Testing with an AI client](TESTING_WITH_AI.md) describes it.
+The tests drive the real server over stdio with the MCP client, against Reynard, two simulated robots using the standard Robot type, a planner that makes long trajectories for them, and Core's test service. Reynard runs as `test/services/instrumented_reynard.py`, which adds a `reynard_diagnostics` service to send chat messages as if typed in the web page and to log what Reynard is asked to do, so tests of chat and timing need no person. [Testing with an AI client](TESTING_WITH_AI.md) describes it.
 
 ## Running a demo
 

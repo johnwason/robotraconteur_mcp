@@ -24,9 +24,12 @@ Then start each of these in its own terminal, from this folder:
 python test/services/instrumented_reynard.py
 python test/services/loopback_robot.py --nodename left_arm --port 52701 --attributes "{\"site\":\"lab\"}"
 python test/services/loopback_robot.py --nodename right_arm --port 52702
+python test/services/trajectory_planner.py
 ```
 
 Reynard's web page is at http://localhost:29201, so you can watch it move.
+
+`trajectory_planner.py` is a `planner` service whose `plan_trajectory(current_position, duration)` returns a `JointTrajectory` for the simulated robots, with waypoints 50 ms apart, that swings each joint up to 0.3 rad from `current_position` and back. It can be passed to a robot's `execute_trajectory` in `trajectory` command mode. A long trajectory is too large to return to the model, so it tests keeping one in the scratchpad.
 
 `instrumented_reynard.py` runs Reynard as `python -m reynard_the_robot` does, and adds a `reynard_diagnostics` service on the same node, so tests can run without anyone typing in the web page:
 
