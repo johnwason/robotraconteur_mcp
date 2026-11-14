@@ -665,6 +665,9 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         const all = r.sequences[0].results.find((x: { label?: string }) => x.label === "all").result;
         assert.equal(all.completed, true);
         assert.equal(all.count, 16);
+        // The sequence keeps the last value next returned, as a planner's final status carries its plan
+        const kept = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: r.sequences[0].kept_as });
+        assert.deepEqual({ type: kept.type, value: kept.value }, { type: "double", value: 15 });
     });
 
     test("a sequence polls a generator in the background", async () =>

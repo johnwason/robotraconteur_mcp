@@ -309,7 +309,7 @@ export class BridgeTools
      * Run a generator to its end. If the signal aborts, the generator is aborted on the service and
      * the signal's reason is thrown
      */
-    private async runGenerator(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, all?: unknown[]): Promise<Record<string, unknown>>
+    private async runGenerator(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, all?: unknown[], last?: { value?: unknown; has: boolean }): Promise<Record<string, unknown>>
     {
         // A call to next can wait a long time for a robot, so the abort is sent as soon as it happens
         const abort = () => void stub.callFunctionGenAbort(handle).catch(() => undefined);
@@ -317,7 +317,7 @@ export class BridgeTools
         try
         {
             if (signal?.aborted) abort();
-            return await this.generatorLoop(stub, handle, inputs, timeout_s, signal, all);
+            return await this.generatorLoop(stub, handle, inputs, timeout_s, signal, all, last);
         }
         catch (e)
         {
@@ -330,8 +330,8 @@ export class BridgeTools
         }
     }
 
-    /** all, if given, receives every result as received, for the scratchpad */
-    private async generatorLoop(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, all?: unknown[]): Promise<Record<string, unknown>>
+    /** all, if given, receives every result as received, and last the latest, for the scratchpad */
+    private async generatorLoop(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, all?: unknown[], last?: { value?: unknown; has: boolean }): Promise<Record<string, unknown>>
     {
         const deadline = Date.now() + timeout_s * 1000;
         const results: unknown[] = [];
@@ -356,6 +356,11 @@ export class BridgeTools
             {
                 const value = await stub.callFunctionGenNext(handle, param);
                 count++;
+                if (handle.returnType && last)
+                {
+                    last.value = value;
+                    last.has = true;
+                }
                 if (handle.returnType && all) all.push(value);
                 else if (handle.returnType)
                 {
@@ -409,14 +414,18 @@ export class BridgeTools
         if (generator && direct) return this.openGenerator(stub, name, result as GeneratorHandle);
         if (generator)
         {
-            if (store_result === undefined) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal);
+            // The last value next returned is the result of a run to the end, such as the final status of a
+            // planner carrying its plan, so a sequence keeps it, whole and unchanged, as its last result
+            const last: { value?: unknown; has: boolean } = { has: false };
+            const native = (run: Record<string, unknown>) => last.has && returns && returns.type !== "void" ? withNative(run, { value: last.value, info: this.info(stub, returns) }) : run;
+            if (store_result === undefined) return native(await this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal, undefined, last));
             // Every result is kept, as a list, which a list type cannot hold, so a list of lists is kept as JSON
             const all: unknown[] = [];
-            const run = await this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal, all);
+            const run = await this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal, all, last);
             const stored = returns!.container
                 ? this.scratchpad.store(store_result, all.map((v) => new Codec(stub.context.types).toJson(v, returns!, scope(stub))))
                 : this.keep(stub, store_result, all, { ...returns!, container: "list" });
-            return { ...run, results: undefined, stored };
+            return native({ ...run, results: undefined, stored });
         }
         if (store_result !== undefined) return withNative({ stored: this.keep(stub, store_result, result, m.type!) }, { value: result, info: this.info(stub, m.type!) });
         if (m.type?.type === "void") return { result: null };
