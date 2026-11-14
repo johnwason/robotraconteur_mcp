@@ -82,6 +82,17 @@ function numericArrayToJson(a: ArrayLike<unknown>, p: PrimitiveInfo, limit?: Arr
     };
 }
 
+/**
+ * Convert the items of a list or an array of structures. With a limit, a long one is summarized, as a
+ * numeric array is: its length and its first items, converted. Only those are converted, so a large
+ * value is summarized quickly
+ */
+function summarizedItems(a: unknown[], item: (x: unknown) => unknown, limit?: ArrayLimit): unknown
+{
+    if (!limit || a.length <= limit.maxArray) return a.map(item);
+    return { truncated: true, length: a.length, first: a.slice(0, limit.maxArray).map(item) };
+}
+
 function parseNumber(v: unknown, path: string, p: PrimitiveInfo): number
 {
     if (typeof v === "number") return v;
@@ -195,14 +206,14 @@ export class Codec
         return { r, members: r.entry?.members ?? [] };
     }
 
-    /** Convert a received value to JSON. A limit summarizes large arrays */
+    /** Convert a received value to JSON. A limit summarizes large arrays, lists, and arrays of structures */
     toJson(v: unknown, t: TypeDefinition, scope: ServiceDefinition, limit?: ArrayLimit): unknown
     {
         if (t.container && t.container !== "generator")
         {
             if (v === null || v === undefined) return null;
             const { container: _, ...item } = t;
-            if (t.container === "list") return (v as unknown[]).map((x) => this.toJson(x, item, scope, limit));
+            if (t.container === "list") return summarizedItems(v as unknown[], (x) => this.toJson(x, item, scope, limit), limit);
             return Object.fromEntries([...(v as Map<unknown, unknown>)].map(([k, x]) => [String(k), this.toJson(x, item, scope, limit)]));
         }
         if (t.type === "void") return null;
@@ -239,9 +250,9 @@ export class Codec
         if (t.array === "multidimarray")
         {
             const m = v as { dims: ArrayLike<number>; array: unknown[] };
-            return { dims: Array.from(m.dims), array: m.array.map(item) };
+            return { dims: Array.from(m.dims), array: summarizedItems(m.array, item, limit) };
         }
-        if (t.array) return (v as unknown[]).map(item);
+        if (t.array) return summarizedItems(v as unknown[], item, limit);
         return item(v);
     }
 

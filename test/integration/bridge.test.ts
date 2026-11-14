@@ -148,7 +148,28 @@ async function trajectoryMode(service: string): Promise<void>
 async function planMove(service: string, target: unknown, duration_s: number, key: string): Promise<void>
 {
     await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state", store_result: `${key}_from` });
-    await ok(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_move", arguments: [{ $scratchpad: `${key}_from.joint_position` }, target, duration_s], store_result: key });
+    await plan("plan_move", [{ $scratchpad: `${key}_from.joint_position` }, target, duration_s], key);
+}
+
+/**
+ * Run one of the planner's generators as a model does, as with the Tesseract service's run: step it to
+ * its end, then copy the plan out of the final status, kept as kept_as, to key. Returns the statuses
+ */
+async function plan(name: string, args: unknown[], key: string): Promise<any[]>
+{
+    const { generator } = await ok(bridge, "robotraconteur_call_function", { service: PLANNER, name, arguments: args });
+    const statuses: any[] = [];
+    let kept: string | undefined;
+    for (;;)
+    {
+        const r = await ok(bridge, "robotraconteur_generator", { generator, action: "next" });
+        if (r.done) break;
+        statuses.push(r.value);
+        kept = r.kept_as;
+    }
+    assert.deepEqual(statuses.map((x) => x.action_status.name), ["running", "complete"]);
+    await ok(bridge, "robotraconteur_scratchpad", { action: "copy", path: `${kept}.data_storage.trajectory.value`, to: key });
+    return statuses;
 }
 
 /**
@@ -2003,9 +2024,12 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         await moveRobot(service, start, 0.5);
         await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state", store_result: "here" });
         // 20 s with waypoints every 50 ms, too large to return to the model
-        const planned = await ok(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_trajectory", arguments: [{ $scratchpad: "here.joint_position" }, 20], store_result: "traj" });
-        assert.equal(planned.stored.type, "com.robotraconteur.robotics.trajectory.JointTrajectory");
-        assert.ok(planned.stored.bytes > 64 * 1024, String(planned.stored.bytes));
+        const plan_statuses = await plan("plan_trajectory", [{ $scratchpad: "here.joint_position" }, 20], "traj");
+        // The final status shown carries the plan summarized, while the kept one has it whole
+        assert.ok(JSON.stringify(plan_statuses[1]).length < 64 * 1024);
+        const planned = (await ok(bridge, "robotraconteur_scratchpad", { action: "list" })).keys.find((k: { key: string }) => k.key === "traj");
+        assert.equal(planned.type, "com.robotraconteur.robotics.trajectory.JointTrajectory");
+        assert.ok(planned.bytes > 64 * 1024, String(planned.bytes));
         assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "traj.waypoints[400].time_from_start" })).value, 20);
 
         await ok(bridge, "robotraconteur_set_property", { service, name: "command_mode", value: "halt" });
@@ -2059,7 +2083,7 @@ describe("the scratchpad", { timeout: 300000 }, () =>
             ...[0, 1, 2].flatMap((i) => [
                 { action: "read_wire", service, name: "robot_state", store_result: "leg_from" },
                 { action: "call_function", service: PLANNER, name: "plan_move", arguments: [{ $scratchpad: "leg_from.joint_position" }, { $scratchpad: `wp[${i}]` }, 0.5], store_result: "leg" },
-                trajectoryStep(service, "leg")
+                trajectoryStep(service, "leg[-1].data_storage.trajectory.value")
             ]),
             { action: "call_function", service: ROUNDTRIP, name: "digest_waypoints", arguments: [{ $scratchpad: "wp" }], label: "digest" },
             { action: "call_function", service: ROUNDTRIP, name: "stream_waypoints", arguments: [2, 6], store_result: "streamed", label: "streamed" }

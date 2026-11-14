@@ -222,3 +222,12 @@ test("an enum name sent as a JSON string inside the string is accepted", () =>
     // A plain string keeps its quotes
     assert.equal(codec.fromJson('"quoted"', t("string"), scope), '"quoted"');
 });
+
+test("long lists and arrays of structures are summarized too", () =>
+{
+    const items = Array.from({ length: 50 }, (_, i) => ({ a: i, b: "x" }));
+    const summary = codec.toJson(items, t("inner{list}"), scope, { maxArray: 4 }) as { truncated: boolean; length: number; first: unknown[] };
+    assert.deepEqual(summary, { truncated: true, length: 50, first: items.slice(0, 4) });
+    assert.equal((codec.toJson(items, t("inner{list}"), scope) as unknown[]).length, 50);
+    assert.deepEqual(codec.toJson(items.slice(0, 3), t("inner{list}"), scope, { maxArray: 4 }), items.slice(0, 3));
+});

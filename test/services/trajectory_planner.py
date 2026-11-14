@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""A trajectory planner that makes long joint trajectories for the loopback robot.
+"""A trajectory planner that makes joint trajectories for the loopback robot.
 
-plan_trajectory takes the robot's current joint position and a duration, and returns a JointTrajectory
-with waypoints 50 ms apart that can be passed to Robot execute_trajectory. Each joint swings away from
-its current position and back several times, so the trajectory starts and ends at the current position
-with zero velocity. It runs until its stdin closes."""
+It plans as the Tesseract Robot Raconteur service's TaskExecutor run does: each function returns a
+generator of PlanStatus, which reports running while it plans, then complete with the plan in its
+data_storage, under "trajectory", as a varvalue JointTrajectory with waypoints 50 ms apart that can be
+passed to Robot execute_trajectory. plan_move moves smoothly from one joint position to another, and
+plan_trajectory swings each joint away from its current position and back several times. It runs
+until its stdin closes."""
 import argparse
 import os
 import sys
+import threading
+import time
 
 import numpy as np
 import RobotRaconteur as RR
@@ -20,11 +24,24 @@ service experimental.trajectory_planner
 
 stdver 0.10
 
+import com.robotraconteur.action
 import com.robotraconteur.robotics.trajectory
 
+using com.robotraconteur.action.ActionStatusCode
 using com.robotraconteur.robotics.trajectory.JointTrajectory
 
-## Plans long joint trajectories for the simulated robots, for testing
+## The progress of a plan, as the Tesseract service's TaskExecutorStatus gives it
+struct PlanStatus
+    ## running while planning, then complete
+    field ActionStatusCode action_status
+    ## Once complete, the plan under "trajectory", a varvalue JointTrajectory
+    field varvalue{string} data_storage
+    field varvalue{string} extended
+end
+
+## Plans joint trajectories for the simulated robots, for testing. Each function returns a generator
+## of PlanStatus: call next until it ends; the last status, complete, carries the plan in
+## data_storage under "trajectory"
 object TrajectoryPlanner
     ## The time between waypoints, in seconds
     property double waypoint_period [readonly]
@@ -32,14 +49,14 @@ object TrajectoryPlanner
     property double max_duration [readonly]
     ## Plan a trajectory of the given duration in seconds, starting and ending at current_position,
     ## the robot's joint positions in radians. Each joint swings up to 0.3 rad away and back. The
-    ## duration is rounded to a whole number of waypoint periods. Pass the result to the robot's
+    ## duration is rounded to a whole number of waypoint periods. Pass the plan to the robot's
     ## execute_trajectory in trajectory command mode
-    function JointTrajectory plan_trajectory(double[] current_position, double duration)
+    function PlanStatus{generator} plan_trajectory(double[] current_position, double duration)
     ## Plan a smooth move from current_position to target_position, the robot's joint positions in
     ## radians, taking duration seconds, starting and ending at rest. The target must be within the
-    ## joint limits, and the move slow enough for the joint velocity limits. Pass the result to the
+    ## joint limits, and the move slow enough for the joint velocity limits. Pass the plan to the
     ## robot's execute_trajectory in trajectory command mode
-    function JointTrajectory plan_move(double[] current_position, double[] target_position, double duration)
+    function PlanStatus{generator} plan_move(double[] current_position, double[] target_position, double duration)
 end
 """
 
@@ -49,6 +66,37 @@ _MAX_DURATION = 600.0
 _AMPLITUDE = 0.3
 # The time for one swing out and back, in seconds
 _SWING_PERIOD = 4.0
+# How long planning takes, so that a running status comes before the plan, as from a real planner
+_PLANNING_S = 0.3
+
+
+class _PlanGenerator:
+    """Gives running, then complete with the plan, then ends, as a Tesseract task's generator does"""
+
+    def __init__(self, planner, trajectory):
+        self._planner = planner
+        self._trajectory = trajectory
+        self._step = 0
+        self._lock = threading.Lock()
+
+    def Next(self):
+        with self._lock:
+            step = self._step
+            self._step += 1
+        if step == 0:
+            time.sleep(_PLANNING_S)
+            return self._planner._status("running")
+        if step == 1:
+            return self._planner._status("complete", self._trajectory)
+        raise RR.StopIterationException("")
+
+    def Close(self):
+        with self._lock:
+            self._step = 2
+
+    def Abort(self):
+        with self._lock:
+            self._step = 2
 
 
 class TrajectoryPlannerImpl:
@@ -63,6 +111,17 @@ class TrajectoryPlannerImpl:
         self._traj_type = RRN.GetStructureType("com.robotraconteur.robotics.trajectory.JointTrajectory")
         self._waypoint_type = RRN.GetStructureType("com.robotraconteur.robotics.trajectory.JointTrajectoryWaypoint")
         self._radian = RRN.GetConstants("com.robotraconteur.robotics.joints")["JointPositionUnits"]["radian"]
+        self._status_type = RRN.GetStructureType("experimental.trajectory_planner.PlanStatus")
+        self._action_status = RRN.GetConstants("com.robotraconteur.action")["ActionStatusCode"]
+
+    def _status(self, action_status, trajectory=None):
+        s = self._status_type()
+        s.action_status = self._action_status[action_status]
+        s.data_storage = {}
+        if trajectory is not None:
+            s.data_storage["trajectory"] = RR.VarValue(trajectory, "com.robotraconteur.robotics.trajectory.JointTrajectory")
+        s.extended = {}
+        return s
 
     def _trajectory(self, positions, velocities, times):
         traj = self._traj_type()
@@ -109,7 +168,7 @@ class TrajectoryPlannerImpl:
         velocities = [delta * np.pi / (2 * total_time) * np.sin(np.pi * t / total_time) for t in times]
         positions[-1] = np.copy(q1)
         velocities[-1] = np.zeros(len(q0))
-        return self._trajectory(positions, velocities, times)
+        return _PlanGenerator(self, self._trajectory(positions, velocities, times))
 
     def plan_trajectory(self, current_position, duration):
         q0 = np.asarray(current_position, dtype=np.float64).flatten()
@@ -155,7 +214,7 @@ class TrajectoryPlannerImpl:
         # End exactly where it started
         traj.waypoints[-1].joint_position = np.copy(q0)
         traj.waypoints[-1].joint_velocity = np.zeros((n_joints,))
-        return traj
+        return _PlanGenerator(self, traj)
 
 
 def main():
