@@ -250,7 +250,7 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         const service = "robot_b.robot";
         const before = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value;
         const tcp = { rotation: { w: 1, x: 0, y: 0, z: 0 }, translation: { x: 0, y: 0, z: 0.1 } };
-        await ok(bridge, "robotraconteur_call_function", { service, name: "tool_attached", arguments: [0, { tcp }] });
+        await ok(bridge, "robotraconteur_call_function", { service, name: "tool_attached", arguments: [0, { tcp, device_info: { device: { name: "gripper" } } }] });
         try
         {
             await new Promise((resolve) => setTimeout(resolve, 300));
@@ -261,7 +261,8 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         }
         finally
         {
-            await ok(bridge, "robotraconteur_call_function", { service, name: "tool_detached", arguments: [0, ""] });
+            await fails(bridge, "robotraconteur_call_function", { service, name: "tool_detached", arguments: [0, "other"] }, /Invalid tool name/);
+            await ok(bridge, "robotraconteur_call_function", { service, name: "tool_detached", arguments: [0, "gripper"] });
         }
     });
 

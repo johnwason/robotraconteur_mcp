@@ -47,6 +47,19 @@ class LoopbackRobot(AbstractRobot):
         if joint_pos_cmd is not None:
             self._simulated_position = np.copy(joint_pos_cmd)
 
+    def tool_detached(self, chain, tool_name):
+        # The abstract robot 0.2.3 reads the attached tool's name from the list of tools rather than
+        # from the chain's entry, so detaching a tool by its name always fails. Check the name here,
+        # then let it detach the tool without one
+        if tool_name:
+            with self._lock:
+                tool = self._current_tool[chain] if 0 <= chain < len(self._current_tool) else None
+                device_info = tool.device_info if tool is not None else None
+                name = device_info.device.name if device_info is not None and device_info.device is not None else ""
+            if tool is not None and name != tool_name:
+                raise RR.InvalidArgumentException(f"Invalid tool name to detach from kinematic chain {chain}")
+        super().tool_detached(chain, "")
+
     def _send_disable(self, handler):
         handler(None)
 
