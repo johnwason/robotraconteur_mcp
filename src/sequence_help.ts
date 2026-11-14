@@ -17,7 +17,7 @@
 
 import { SEQUENCE_LIMITS } from "./sequence.js";
 
-export const HELP_TOPICS = ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"] as const;
+export const HELP_TOPICS = ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "scratchpad", "examples"] as const;
 export type HelpTopic = typeof HELP_TOPICS[number];
 
 /** One line on each topic, for the tool description and the sequences category's list */
@@ -30,6 +30,7 @@ export const HELP_TOPIC_SUMMARIES: Record<HelpTopic, string> = {
     on_stop: "cleanup steps after an early end, and querying how the sequence ended with _sequence",
     skipping: "only_if on the outcomes of earlier labelled steps",
     events: "which step takes an event, events received earlier, and new_events_only",
+    scratchpad: "passing a result from one step to a later one, such as an image or a robot pose, with store_result and $scratchpad",
     examples: "complete start_sequence calls"
 };
 
@@ -97,6 +98,17 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 - An event that wait_until or stop_when matches is returned in its result and removed from what robotraconteur_read_events returns.
 - Sequences share events: the first step of any sequence to match an event takes it, so another sequence waiting for the same event will not see it. Within a sequence, an active stop_when's events are held for it (see stopping).
 - Events received before a step started and not yet read also count, so none is missed between sequences, but a stale one can then end a wait. Set new_events_only on wait_until or stop_when, including the event entries of watch, to only count events received after that step starts. A wait that times out says how many earlier events it ignored. Leave it off for a stop_when on an operator request or a fault, so that one sent before the sequence started, such as between sequences, still stops it. Otherwise a stop sent while no sequence was running is ignored for good, and the next sequence moves the device anyway.`,
+
+    scratchpad: `A step can pass a result to a later step through robotraconteur_scratchpad, without it passing through you.
+- store_result on get_property, read_wire, call_function, or read_events keeps the result under a key, replacing what was there, and the step's result is a short summary. A generator's results are kept as a list.
+- In value, arguments, generator_inputs, or joint_position, { "$scratchpad": "path" } stands for a kept value, read when the step runs. The path is a key, optionally with fields and indexes, such as pose.joint_position or wp[2]. It can be a whole argument, or one field of a structure given in JSON.
+- Before the sequences start, a path must use a key that already exists or that a step of the call stores. A key stored by another sequence of the call may not be there yet when the step runs, and the step then fails.
+- Keys are shared by every sequence and tool call. Use different keys for sequences that run at the same time.
+Capture an image and pass it to a detector, then move to a pose kept earlier:
+{ "sequences": [{ "steps": [
+    { "action": "call_function", "service": "camera", "name": "capture_frame", "store_result": "img" },
+    { "action": "call_function", "service": "detector", "name": "detect", "arguments": [{ "$scratchpad": "img" }], "store_result": "found" },
+    { "action": "robot_move_joints", "service": "robot", "joint_position": { "$scratchpad": "home.joint_position" }, "duration_s": 3 } ] }] }`,
 
     examples: `Two robots started together, where a stop message halts one while the other goes on:
 { "sequences": [

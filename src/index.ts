@@ -41,6 +41,9 @@ async function respond(run: () => Promise<Result> | Result)
 const service = z.string().describe("Name of the service, as listed by robotraconteur_discover");
 const object = z.string().optional().describe("Path to a sub object, such as arm or arm.tool[0]. Leave unset for the root object");
 const name = (kind: string) => z.string().describe(`Name of the ${kind}, as listed by robotraconteur_describe`);
+const store_result = z.string().optional().describe("Keep the result in the scratchpad under this key and return only a summary. See robotraconteur_scratchpad");
+const ref = z.strictObject({ $scratchpad: z.string() });
+const joint_position = z.union([z.array(z.number()), ref]);
 
 const watch_entry = z.strictObject({
     key: z.string().optional().describe("The name combine uses for this entry. Defaults to name; keys must differ"),
@@ -72,7 +75,7 @@ const step = z.strictObject({
     arguments: z.unknown().optional().describe("For call_function, an array of arguments or an object keyed by parameter name"),
     generator_inputs: z.array(z.unknown()).optional().describe("For call_function of a generator that takes a value at each step"),
     timeout_s: z.number().positive().optional().describe("For wait_until, how long to wait before the step fails. For a generator call_function, abort after this long; the default is 60"),
-    joint_position: z.array(z.number()).optional().describe("For robot_move_joints, the target position of every joint"),
+    joint_position: joint_position.optional().describe("For robot_move_joints, the target position of every joint"),
     duration_s: z.number().positive().max(100).optional().describe("For robot_move_joints, how long the motion takes in seconds"),
     seconds: z.number().min(0).optional().describe("For wait, how long to wait"),
     condition: z.record(z.string(), z.unknown()).optional().describe("For wait_until and stop_when, a MongoDB query on the JSON the read tools show, such as { \"joint_position.0\": { \"$gte\": 0.29 } }, { \"value\": { \"$gt\": 0.5 } } for a number, or {} for any event of that name. An event is matched by its arguments by parameter name, such as { \"message\": \"stop\" }, not by the time, event, and arguments that read_events shows. For text in any case, use $expr with $toLower, such as { \"$expr\": { \"$eq\": [{ \"$toLower\": \"$message\" }, \"stop\"] } }. Enums, 64-bit integers, and allowed operators: robotraconteur_help topic conditions"),
@@ -81,6 +84,7 @@ const step = z.strictObject({
     combine: z.record(z.string(), z.unknown()).optional().describe("With watch, a MongoDB query over the entries by key, each true or false, such as { \"msg\": true, \"arm_ok\": true }. robotraconteur_help topic: waiting"),
     check_every_s: z.number().min(SEQUENCE_LIMITS.minEvery).optional().describe("For wait_until and stop_when, how often to read wires and properties. The default is 0.05"),
     clear: z.boolean().optional().describe("For read_events, remove the returned events. The default is true"),
+    store_result: z.string().optional().describe("For get_property, read_wire, call_function, and read_events, keep the result in the scratchpad under this key. robotraconteur_help topic: scratchpad"),
     limit: z.number().int().positive().max(200).optional().describe("For read_events, the most events to return. The default is 50"),
     at_s: z.number().min(0).optional().describe("Start this many seconds after the sequence started, or with after, after that step ended. The step must start on time or it fails. robotraconteur_help topic: timing"),
     target: z.string().optional().describe("For end_stop_when, the label of the stop_when to end, or none to end all"),
@@ -119,9 +123,9 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
 
     server.registerTool("robotraconteur_get_property", {
         description: "Read a property of a service.",
-        inputSchema: z.object({ service, object, name: name("property") }),
+        inputSchema: z.object({ service, object, name: name("property"), store_result }),
         annotations: { readOnlyHint: true }
-    }, ({ service: s, object: o, name: n }) => respond(() => tools.getProperty(s, o, n)));
+    }, ({ service: s, object: o, name: n, store_result: k }) => respond(() => tools.getProperty(s, o, n, k)));
 
     server.registerTool("robotraconteur_set_property", {
         description: "Write a property of a service. Enums can be given by name. 64-bit integers can be given as decimal strings. " + PARALLEL_NOTE,
@@ -136,15 +140,16 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
             name: name("function"),
             arguments: z.unknown().optional().describe("An array of arguments, or an object keyed by parameter name"),
             generator_inputs: z.array(z.unknown()).optional().describe("For a generator that takes a value at each step, the values to send"),
-            timeout_s: z.number().positive().optional().describe("For a generator, abort after this many seconds. The default is 60")
+            timeout_s: z.number().positive().optional().describe("For a generator, abort after this many seconds. The default is 60"),
+            store_result
         })
-    }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60, ctx.mcpReq.signal)));
+    }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60, ctx.mcpReq.signal, a.store_result)));
 
     server.registerTool("robotraconteur_read_wire", {
         description: "Read the latest value of a wire. Wires carry continuously updated data such as robot state and sensor readings. read_at is when it was read, not when the device last updated it. not_updating appears when a standard state's seqno has not changed for 5 s: the device stopped sending.",
-        inputSchema: z.object({ service, object, name: name("wire") }),
+        inputSchema: z.object({ service, object, name: name("wire"), store_result }),
         annotations: { readOnlyHint: true }
-    }, ({ service: s, object: o, name: n }) => respond(() => tools.readWire(s, o, n)));
+    }, ({ service: s, object: o, name: n, store_result: k }) => respond(() => tools.readWire(s, o, n, k)));
 
     server.registerTool("robotraconteur_write_wire", {
         description: "Set the value being sent on a wire.",
@@ -157,19 +162,38 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
             service,
             name: z.string().optional().describe("Only return events with this name, such as new_message"),
             clear: z.boolean().optional().describe("Remove the returned events from the buffer, so the next call returns the ones after them. The default is true"),
-            limit: z.number().int().positive().max(200).optional().describe("The most events to return, oldest first. The default is 50")
+            limit: z.number().int().positive().max(200).optional().describe("The most events to return, oldest first. The default is 50"),
+            store_result
         })
-    }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name)));
+    }, (a) => respond(() => tools.readEvents(a.service, a.clear ?? true, a.limit ?? 50, a.name, a.store_result)));
 
     server.registerTool("robotraconteur_robot_move_joints", {
         description: "Move a standard Robot Raconteur robot smoothly to joint positions and wait for it to arrive. Use this instead of building a trajectory by hand. Positions are in the robot's joint units, usually radians. It needs a robot that supports the trajectory command mode. Read robot_state with robotraconteur_read_wire to find the current position. Refused if a target is outside its joint limits or robot_state is not updating. On success the robot is left in trajectory command mode; on a failure, stop, or timeout (duration_s + 30 s) it is halted. " + PARALLEL_NOTE,
         inputSchema: z.object({
             service,
             object,
-            joint_position: z.array(z.number()).describe("The target position of every joint, in order"),
+            joint_position: joint_position.describe("The target position of every joint, in order"),
             duration_s: z.number().positive().max(100).describe("How long the motion should take, in seconds. The maximum is 100")
         })
     }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
+
+    server.registerTool("robotraconteur_scratchpad", {
+        description: "Values kept in this server, so that large data such as images and trajectories can go from one service to another without passing through you. Keep a result with store_result. Use a kept value in place of any value, argument, or joint_position as { \"$scratchpad\": \"path\" }, where path is a key, optionally with fields and indexes, such as img or state.joint_position[2]. Actions: list; get, the value at path; set, value at path, where value can be a $scratchpad reference to copy; delete, a key. Kept until the server restarts.",
+        inputSchema: z.object({
+            action: z.enum(["list", "get", "set", "delete"]),
+            path: z.string().optional().describe("A key, optionally with fields and indexes"),
+            value: z.unknown().optional().describe("For set, the value in JSON")
+        })
+    }, (a) => respond(() =>
+    {
+        const pad = tools.scratchpad;
+        if (a.action === "list") return pad.list();
+        if (a.path === undefined) throw new Error(`${a.action} needs path.`);
+        if (a.action === "get") return pad.get(a.path);
+        if (a.action === "delete") return pad.delete(a.path);
+        if (!("value" in a)) throw new Error("set needs value.");
+        return pad.set(a.path, a.value);
+    }));
 
     server.registerTool("robotraconteur_start_sequence", {
         description: `Start one or more timed sequences of steps, and return at once with each one's sequence_id. The steps run in the server without a round trip through the model, so their timing is exact. Before writing your first sequence, read robotraconteur_help topics actions, timing, and stopping, and others as needed, such as waiting, conditions, on_stop, skipping, events, and examples, in one call.

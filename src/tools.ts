@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { RobotRaconteurError } from "robotraconteur";
-import type { GeneratorHandle, MemberDefinition, ServiceStub } from "robotraconteur";
+import { parseTypeDefinition, RobotRaconteurError } from "robotraconteur";
+import type { GeneratorHandle, MemberDefinition, ServiceStub, TypeDefinition } from "robotraconteur";
 import { Codec } from "./codec.js";
 import { describeObject } from "./describe.js";
 import type { ReceivedEvent, ServiceRegistry } from "./registry.js";
+import { parsePath, Scratchpad } from "./scratchpad.js";
 
 /** Tool results larger than this are sent with their large arrays summarized */
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -130,6 +131,12 @@ function encode(stub: ServiceStub, value: unknown, t: MemberDefinition["type"]):
     return JSON.stringify(full).length <= MAX_RESULT_BYTES ? full : codec.toJson(value, t, scope(stub), SUMMARIZED);
 }
 
+function withoutGenerator(t: TypeDefinition): TypeDefinition
+{
+    const { container: _, ...item } = t;
+    return item;
+}
+
 function sleep(ms: number): Promise<void>
 {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -142,7 +149,37 @@ export class BridgeTools
     /** The last sequence number seen on each wire, and since when, by service, object, and wire */
     private seqnos = new Map<string, { seqno: string; since: number }>();
 
-    constructor(private registry: ServiceRegistry) {}
+    constructor(private registry: ServiceRegistry, readonly scratchpad = new Scratchpad()) {}
+
+    /**
+     * A codec that reads scratchpad markers. In a check, pending holds the keys that steps will store,
+     * which need not exist yet
+     */
+    private codec(stub: ServiceStub, pending?: ReadonlySet<string>): Codec
+    {
+        return new Codec(stub.context.types, this.scratchpad.resolver(pending));
+    }
+
+    /** Keep a value from a service in the scratchpad, with its type */
+    private keep(stub: ServiceStub, key: string, value: unknown, type: TypeDefinition): Record<string, unknown>
+    {
+        return this.scratchpad.store(key, value, { type, types: stub.context.types, scope: scope(stub) });
+    }
+
+    /** Refuse a store_result key before a request is sent, so that a bad key does not lose the result */
+    private checkKey(key: string | undefined): void
+    {
+        if (key === undefined) return;
+        const { segments } = parsePath(key);
+        if (segments.length > 0) throw new Error(`store_result must be a key, such as img, not the path "${key}".`);
+    }
+
+    /** The target of robot_move_joints, given as numbers or as a scratchpad marker */
+    private jointTarget(stub: ServiceStub, given: unknown, pending?: ReadonlySet<string>): number[] | undefined
+    {
+        const v = this.codec(stub, pending).fromJson(given, parseTypeDefinition("double[]"), scope(stub), "joint_position") as Float64Array | undefined;
+        return v === undefined ? undefined : Array.from(v);
+    }
 
     /** Report what is known now. Searching happens in the background and never delays the answer */
     discover(refresh: boolean): Record<string, unknown>
@@ -174,18 +211,21 @@ export class BridgeTools
         return describeObject(await this.registry.resolve(service, object), member_name);
     }
 
-    async getProperty(service: string, object: string | undefined, name: string): Promise<Record<string, unknown>>
+    async getProperty(service: string, object: string | undefined, name: string, store_result?: string): Promise<Record<string, unknown>>
     {
+        this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["property"]);
-        return { value: encode(stub, await stub.getProperty(name), m.type) };
+        const value = await stub.getProperty(name);
+        if (store_result !== undefined) return { stored: this.keep(stub, store_result, value, m.type!) };
+        return { value: encode(stub, value, m.type) };
     }
 
     async setProperty(service: string, object: string | undefined, name: string, value: unknown): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["property"]);
-        await stub.setProperty(name, new Codec(stub.context.types).fromJson(value, m.type!, scope(stub), name));
+        await stub.setProperty(name, this.codec(stub).fromJson(value, m.type!, scope(stub), name));
         return { ok: true };
     }
 
@@ -194,8 +234,9 @@ export class BridgeTools
      * for it, without using it. "service" only checks that the service can be reached, and "robot"
      * checks for a standard robot that robot_move_joints can move
      */
-    async check(service: string, object: string | undefined, kind: "service" | "event" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[]): Promise<void>
+    async check(service: string, object: string | undefined, kind: "service" | "event" | "property" | "wire" | "function" | "robot", name: string, value?: unknown, generator_inputs?: unknown[], pending: ReadonlySet<string> = new Set(), store_result?: string): Promise<void>
     {
+        this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         if (kind === "service") return;
         if (kind === "event")
@@ -206,29 +247,28 @@ export class BridgeTools
         if (kind === "robot")
         {
             robotMember(stub);
-            // The joint count is checked now, so that a wrong one fails before anything moves
-            if (Array.isArray(value))
-            {
-                checkJointTarget(await stub.getProperty("robot_info") as RobotInfo, value as number[]);
-            }
+            // The joint count is checked now, so that a wrong one fails before anything moves. A target
+            // that a step will store is checked when the motion starts
+            const target = value === undefined ? undefined : this.jointTarget(stub, value, pending);
+            if (target) checkJointTarget(await stub.getProperty("robot_info") as RobotInfo, target);
             return;
         }
         const m = member(stub, name, [kind]);
         if (kind === "function")
         {
-            this.convertArguments(stub, m, value);
-            this.convertGeneratorInputs(stub, m, generator_inputs);
+            this.convertArguments(stub, m, value, pending);
+            this.convertGeneratorInputs(stub, m, generator_inputs, pending);
         }
         else if (value !== undefined)
         {
-            new Codec(stub.context.types).fromJson(value, m.type!, scope(stub), name);
+            this.codec(stub, pending).fromJson(value, m.type!, scope(stub), name);
         }
     }
 
-    private convertArguments(stub: ServiceStub, m: MemberDefinition, args: unknown): unknown[]
+    private convertArguments(stub: ServiceStub, m: MemberDefinition, args: unknown, pending?: ReadonlySet<string>): unknown[]
     {
         const parameters = (m.parameters ?? []).filter((p) => p.type.container !== "generator");
-        const codec = new Codec(stub.context.types);
+        const codec = this.codec(stub, pending);
         const given = args ?? [];
         if (Array.isArray(given))
         {
@@ -248,13 +288,13 @@ export class BridgeTools
         });
     }
 
-    private convertGeneratorInputs(stub: ServiceStub, m: MemberDefinition, inputs: unknown[] | undefined): unknown[] | undefined
+    private convertGeneratorInputs(stub: ServiceStub, m: MemberDefinition, inputs: unknown[] | undefined, pending?: ReadonlySet<string>): unknown[] | undefined
     {
         const parameter = m.parameters?.find((p) => p.type.container === "generator");
         if (!parameter) return undefined;
         if (!inputs) throw new Error(`${m.name} takes a stream of values for ${parameter.name}. Give them in generator_inputs`);
         const { container: _, ...item } = parameter.type;
-        const codec = new Codec(stub.context.types);
+        const codec = this.codec(stub, pending);
         return inputs.map((v, i) => codec.fromJson(v, item, scope(stub), `generator_inputs[${i}]`));
     }
 
@@ -262,7 +302,7 @@ export class BridgeTools
      * Run a generator to its end. If the signal aborts, the generator is aborted on the service and
      * the signal's reason is thrown
      */
-    private async runGenerator(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
+    private async runGenerator(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, all?: unknown[]): Promise<Record<string, unknown>>
     {
         // A call to next can wait a long time for a robot, so the abort is sent as soon as it happens
         const abort = () => void stub.callFunctionGenAbort(handle).catch(() => undefined);
@@ -270,7 +310,7 @@ export class BridgeTools
         try
         {
             if (signal?.aborted) abort();
-            return await this.generatorLoop(stub, handle, inputs, timeout_s, signal);
+            return await this.generatorLoop(stub, handle, inputs, timeout_s, signal, all);
         }
         catch (e)
         {
@@ -283,7 +323,8 @@ export class BridgeTools
         }
     }
 
-    private async generatorLoop(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
+    /** all, if given, receives every result as received, for the scratchpad */
+    private async generatorLoop(stub: ServiceStub, handle: GeneratorHandle, inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, all?: unknown[]): Promise<Record<string, unknown>>
     {
         const deadline = Date.now() + timeout_s * 1000;
         const results: unknown[] = [];
@@ -308,7 +349,8 @@ export class BridgeTools
             {
                 const value = await stub.callFunctionGenNext(handle, param);
                 count++;
-                if (handle.returnType)
+                if (handle.returnType && all) all.push(value);
+                else if (handle.returnType)
                 {
                     results.push(encode(stub, value, handle.returnType));
                     if (results.length > KEPT_GENERATOR_RESULTS) results.shift();
@@ -322,10 +364,13 @@ export class BridgeTools
         }
     }
 
-    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
+    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, store_result?: string): Promise<Record<string, unknown>>
     {
+        this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["function"]);
+        const returns = m.type?.container === "generator" ? withoutGenerator(m.type) : m.type;
+        if (store_result !== undefined && (!returns || returns.type === "void")) throw new Error(`${name} returns nothing, so there is no result to store.`);
         const converted = this.convertArguments(stub, m, args);
         // Checked before the call, because a generator that has started must be closed
         const inputs = this.convertGeneratorInputs(stub, m, generator_inputs);
@@ -344,7 +389,18 @@ export class BridgeTools
             if (generator && signal?.aborted) void call.then((h) => stub.callFunctionGenAbort(h as GeneratorHandle)).catch(() => undefined);
             throw e;
         }
-        if (generator) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal);
+        if (generator)
+        {
+            if (store_result === undefined) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal);
+            // Every result is kept, as a list, which a list type cannot hold, so a list of lists is kept as JSON
+            const all: unknown[] = [];
+            const run = await this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal, all);
+            const stored = returns!.container
+                ? this.scratchpad.store(store_result, all.map((v) => new Codec(stub.context.types).toJson(v, returns!, scope(stub))))
+                : this.keep(stub, store_result, all, { ...returns!, container: "list" });
+            return { ...run, results: undefined, stored };
+        }
+        if (store_result !== undefined) return { stored: this.keep(stub, store_result, result, m.type!) };
         return { result: m.type?.type === "void" ? null : encode(stub, result, m.type) };
     }
 
@@ -374,12 +430,14 @@ export class BridgeTools
         return `${name} has not updated for at least ${Math.round(u.seconds)} seconds: its seqno has stayed at ${u.seqno} in every read since ${new Date(u.since).toISOString()}, and may have stopped changing before then. The device may have stopped sending new values, such as a driver that is no longer running, so this value is out of date.`;
     }
 
-    async readWire(service: string, object: string | undefined, name: string): Promise<Record<string, unknown>>
+    async readWire(service: string, object: string | undefined, name: string, store_result?: string): Promise<Record<string, unknown>>
     {
+        this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire"]);
         const { value, timestamp } = await stub.peekWireInValue(name);
-        const out: Record<string, unknown> = { value: encode(stub, value, m.type), read_at: this.timestamp(timestamp) };
+        const out: Record<string, unknown> = store_result === undefined ? { value: encode(stub, value, m.type) } : { stored: this.keep(stub, store_result, value, m.type!) };
+        out.read_at = this.timestamp(timestamp);
         const unchanged = this.unchangedFor(service, object, name, value);
         if (unchanged && unchanged.seconds >= NOT_UPDATING_S) out.not_updating = this.notUpdating(name, unchanged);
         return out;
@@ -437,7 +495,7 @@ export class BridgeTools
     {
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire"]);
-        await stub.pokeWireOutValue(name, new Codec(stub.context.types).fromJson(value, m.type!, scope(stub), name));
+        await stub.pokeWireOutValue(name, this.codec(stub).fromJson(value, m.type!, scope(stub), name));
         return { ok: true };
     }
 
@@ -445,12 +503,14 @@ export class BridgeTools
      * The oldest events received, optionally only those of one event, removing them with clear. Also
      * gives now, the server's current time, from the same clock as the events' times
      */
-    async readEvents(service: string, clear: boolean, limit: number, event?: string): Promise<Record<string, unknown>>
+    async readEvents(service: string, clear: boolean, limit: number, event?: string, store_result?: string): Promise<Record<string, unknown>>
     {
+        this.checkKey(store_result);
         if (event !== undefined) member(await this.registry.resolve(service), event, ["event"]);
         const { events, remaining, dropped } = this.registry.takeEvents(service, clear, limit, event);
         // now is from the same clock as the events' times, so the model can tell how long they have waited
-        const out: Record<string, unknown> = { events, remaining, now: new Date().toISOString() };
+        const out: Record<string, unknown> = store_result === undefined ? { events } : { stored: this.scratchpad.store(store_result, events) };
+        Object.assign(out, { remaining, now: new Date().toISOString() });
         if (dropped > 0) out.dropped = dropped;
         const more = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting`;
         if (remaining > 0) out.note = clear ? `${more}. Call again to get ${remaining === 1 ? "it" : "them"}.` : `${more} after these. Since clear is false, calling again returns these first, so call with clear true to reach ${remaining === 1 ? "it" : "them"}.`;
@@ -458,7 +518,7 @@ export class BridgeTools
     }
 
     /** Move a standard robot to joint positions, building a trajectory that meets the driver's rules */
-    async robotMoveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
+    async robotMoveJoints(service: string, object: string | undefined, target: unknown, duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         // Starting a motion selects the command mode, which would stop one already running
         // By the service's full name, so that two names for one robot cannot both move it
@@ -475,10 +535,11 @@ export class BridgeTools
         }
     }
 
-    private async moveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
+    private async moveJoints(service: string, object: string | undefined, given: unknown, duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
         robotMember(stub);
+        const target = this.jointTarget(stub, given)!;
 
         // Its reads are noted as read_wire's are, so a robot that stops updating after a motion is seen sooner
         const state = async () =>

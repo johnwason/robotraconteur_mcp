@@ -156,8 +156,10 @@ function typedArrayFromJson(v: unknown, path: string, p: PrimitiveInfo): unknown
 function typeName(t: TypeDefinition): string
 {
     let s = t.type;
-    if (t.array === "multidimarray") s += t.arrayLength ? `[${t.arrayLength.join(",")}]` : "[*]";
-    else if (t.array === "array") s += t.arrayLength ? `[${t.arrayLength[0]}${t.arrayVarLength ? "-" : ""}]` : "[]";
+    // The parser gives [] as length 0 with variable length, and [*] as variable length with no dims
+    const length = t.arrayLength?.[0] ?? 0;
+    if (t.array === "multidimarray") s += t.arrayVarLength || !t.arrayLength?.length ? "[*]" : `[${t.arrayLength.join(",")}]`;
+    else if (t.array === "array") s += length === 0 ? "[]" : `[${length}${t.arrayVarLength ? "-" : ""}]`;
     if (t.container === "list") s += "{list}";
     else if (t.container === "map_int32") s += "{int32}";
     else if (t.container === "map_string") s += "{string}";
@@ -167,10 +169,25 @@ function typeName(t: TypeDefinition): string
 
 export { typeName };
 
+/** The marker for a value kept in the scratchpad, such as { "$scratchpad": "img.data" } */
+export const REF_KEY = "$scratchpad";
+
+/** Whether a JSON value is a scratchpad marker. No Robot Raconteur name starts with $, so it cannot be a field */
+export function isRef(v: unknown): v is { [REF_KEY]: string }
+{
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+    const keys = Object.keys(v);
+    return keys.length === 1 && keys[0] === REF_KEY && typeof (v as Record<string, unknown>)[REF_KEY] === "string";
+}
+
+/** Gives the value a scratchpad marker points to, converted to the type wanted at that place */
+export type RefResolver = (ref: string, t: TypeDefinition, scope: ServiceDefinition, path: string, codec: Codec) => unknown;
+
 /** Converts between Robot Raconteur values and JSON, using the types in the service definitions */
 export class Codec
 {
-    constructor(private types: TypeContext) {}
+    /** @param refs Resolves scratchpad markers met by fromJson. Without it, a marker is an ordinary object */
+    constructor(readonly types: TypeContext, private refs?: RefResolver) {}
 
     private namedFields(t: TypeDefinition, scope: ServiceDefinition)
     {
@@ -267,6 +284,7 @@ export class Codec
     /** Convert JSON from the model to a value to send */
     fromJson(v: unknown, t: TypeDefinition, scope: ServiceDefinition, path = ""): unknown
     {
+        if (this.refs && isRef(v)) return this.refs(v[REF_KEY], t, scope, path, this);
         if (t.container && t.container !== "generator")
         {
             if (v === null || v === undefined) return null;

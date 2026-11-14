@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseServiceDefinition, parseTypeDefinition, VarValue } from "robotraconteur";
 import { TypeContext } from "robotraconteur/internal";
-import { Codec, CodecError } from "../../src/codec.js";
+import { Codec, CodecError, typeName } from "../../src/codec.js";
 
 const def = parseServiceDefinition(`
 service example.codec
@@ -205,4 +205,12 @@ test("errors say what is wrong and where, so that the model can correct them", (
 test("a single number is accepted for an array", () =>
 {
     assert.deepEqual(codec.fromJson(2, t("double[]"), scope), [2]);
+});
+
+test("type names are written as in a service definition", () =>
+{
+    for (const name of ["double", "double[]", "double[3]", "double[6-]", "int32[*]", "int32[2,3]", "string{list}", "double[]{int32}", "inner{string}"])
+    {
+        assert.equal(typeName(t(name)), name);
+    }
 });

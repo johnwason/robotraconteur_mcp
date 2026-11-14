@@ -16,6 +16,7 @@
 // trips through the model. A sequence is started, followed with its status, and can be cancelled.
 
 import { performance } from "node:perf_hooks";
+import { isRef } from "./codec.js";
 import { compileCondition } from "./condition.js";
 import { errorText } from "./errors.js";
 import type { ReceivedEvent } from "./registry.js";
@@ -113,7 +114,8 @@ export interface SequenceStep
     arguments?: unknown;
     generator_inputs?: unknown[];
     timeout_s?: number;
-    joint_position?: number[];
+    /** The target joints, or a scratchpad marker */
+    joint_position?: unknown;
     duration_s?: number;
     seconds?: number;
     condition?: Record<string, unknown>;
@@ -130,6 +132,7 @@ export interface SequenceStep
     max_late_s?: number;
     only_if?: Record<string, unknown>;
     target?: string;
+    store_result?: string;
     repeat?: { count: number; every_s: number };
     continue_on_error?: boolean;
 }
@@ -141,12 +144,12 @@ export type ResultDetail = "compact" | "full";
 
 /** The fields each action uses, besides those every step can have */
 const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
-    get_property: ["service", "object", "name"],
+    get_property: ["service", "object", "name", "store_result"],
     set_property: ["service", "object", "name", "value"],
-    call_function: ["service", "object", "name", "arguments", "generator_inputs", "timeout_s"],
-    read_wire: ["service", "object", "name"],
+    call_function: ["service", "object", "name", "arguments", "generator_inputs", "timeout_s", "store_result"],
+    read_wire: ["service", "object", "name", "store_result"],
     write_wire: ["service", "object", "name", "value"],
-    read_events: ["service", "name", "clear", "limit"],
+    read_events: ["service", "name", "clear", "limit", "store_result"],
     robot_move_joints: ["service", "object", "joint_position", "duration_s"],
     wait: ["seconds"],
     wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"],
@@ -317,6 +320,7 @@ const HELP_FOR_ERROR: [RegExp, string][] = [
     [/on_stop/, "on_stop"],
     [/\bat_s\b|max_late|\bafter (must|cannot)|cannot tell which one is meant|\bat, |\bat is an absolute|ISO 8601 time/, "timing"],
     [/outside its limits/, "actions"],
+    [/scratchpad|store_result/, "scratchpad"],
     [/\bwatch\b|combine|timeout_s/, "waiting"],
     [/stop_when|\btarget\b/, "stopping"],
     [/action needs|joint_position|repeat|limit must/, "actions"]
@@ -550,12 +554,14 @@ export class SequenceRunner
         const labels = specs.map((s) => s.label).filter((l) => l !== undefined);
         const repeated = labels.find((l, i) => labels.indexOf(l) !== i);
         if (repeated !== undefined) throw new Error(`The label "${repeated}" is used by more than one sequence. Give them different labels.`);
+        // A step can use a scratchpad key that a step of these sequences will store, which need not exist yet
+        const pending = new Set(specs.flatMap((spec) => [...(spec.steps ?? []), ...(spec.on_stop ?? [])]).map((step) => step.store_result).filter((k) => typeof k === "string"));
         const prepared: PreparedSequence[] = [];
         for (const [i, spec] of specs.entries())
         {
             try
             {
-                prepared.push(await this.prepare(spec));
+                prepared.push(await this.prepare(spec, pending));
             }
             catch (e)
             {
@@ -610,7 +616,7 @@ export class SequenceRunner
     }
 
     /** Check one sequence, before anything starts */
-    private async prepare(spec: SequenceSpec): Promise<PreparedSequence>
+    private async prepare(spec: SequenceSpec, pending: ReadonlySet<string>): Promise<PreparedSequence>
     {
         const { service, steps: given_steps = [], on_stop: given_on_stop = [], max_duration_s = SEQUENCE_LIMITS.defaultDuration } = spec;
         const with_service = (s: SequenceStep) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s;
@@ -628,7 +634,7 @@ export class SequenceRunner
                 if (step.label === SEQUENCE_KEY) throw new Error(`The label ${SEQUENCE_KEY} is kept for on_stop's only_if. Use another label.`);
                 // An on_stop step's only_if can query the main steps, and the on_stop steps before it
                 if (step.only_if !== undefined) checkOnlyIf(step.only_if, [...steps, ...on_stop.slice(0, i)], [...steps, ...on_stop], true);
-                await this.check(step, SEQUENCE_LIMITS.maxDuration);
+                await this.check(step, SEQUENCE_LIMITS.maxDuration, pending);
             }
             catch (e)
             {
@@ -659,7 +665,7 @@ export class SequenceRunner
                     if (earlier.length === 0) throw new Error("There is no earlier stop_when step to end.");
                     if (step.target !== undefined && !earlier.some((s) => s.label === step.target)) throw new Error(`target must be the label of an earlier stop_when step, and none has the label "${step.target}". Leave target out to end every stop_when.`);
                 }
-                await this.check(step, max_duration_s);
+                await this.check(step, max_duration_s, pending);
             }
             catch (e)
             {
@@ -768,7 +774,7 @@ export class SequenceRunner
         for (const s of finished.slice(0, Math.max(0, finished.length - SEQUENCE_LIMITS.keptFinished))) this.sequences.delete(s.id);
     }
 
-    private async check(step: SequenceStep, max_duration_s: number): Promise<void>
+    private async check(step: SequenceStep, max_duration_s: number, pending: ReadonlySet<string> = new Set()): Promise<void>
     {
         if (!SEQUENCE_ACTIONS.includes(step.action)) throw new Error(`Unknown action "${String(step.action)}". Use one of: ${SEQUENCE_ACTIONS.join(", ")}.`);
         const unused = Object.keys(step).filter((k) => step[k as keyof SequenceStep] !== undefined && !COMMON_FIELDS.includes(k as keyof SequenceStep) && !ACTION_FIELDS[step.action].includes(k as keyof SequenceStep));
@@ -826,29 +832,29 @@ export class SequenceRunner
         case "get_property":
         case "read_wire":
             need("name");
-            await this.tools.check(service, step.object, step.action === "get_property" ? "property" : "wire", step.name!);
+            await this.tools.check(service, step.object, step.action === "get_property" ? "property" : "wire", step.name!, undefined, undefined, pending, step.store_result);
             break;
         case "set_property":
         case "write_wire":
             need("name");
             if (!("value" in step)) throw new Error(`The ${step.action} action needs value.`);
-            await this.tools.check(service, step.object, step.action === "set_property" ? "property" : "wire", step.name!, step.value);
+            await this.tools.check(service, step.object, step.action === "set_property" ? "property" : "wire", step.name!, step.value, undefined, pending);
             break;
         case "call_function":
             need("name");
             if (step.timeout_s !== undefined && !(step.timeout_s > 0)) throw new Error("timeout_s must be more than 0.");
-            await this.tools.check(service, step.object, "function", step.name!, step.arguments ?? [], step.generator_inputs);
+            await this.tools.check(service, step.object, "function", step.name!, step.arguments ?? [], step.generator_inputs, pending, step.store_result);
             break;
         case "read_events":
             if (step.limit !== undefined && !(Number.isInteger(step.limit) && step.limit > 0 && step.limit <= 200)) throw new Error("limit must be a whole number from 1 to 200.");
-            if (step.name !== undefined) await this.tools.check(service, undefined, "event", step.name);
-            else await this.tools.check(service, undefined, "service", "");
+            if (step.name !== undefined) await this.tools.check(service, undefined, "event", step.name, undefined, undefined, pending, step.store_result);
+            else await this.tools.check(service, undefined, "service", "", undefined, undefined, pending, step.store_result);
             break;
         case "robot_move_joints":
             need("joint_position");
             if (!(typeof step.duration_s === "number" && step.duration_s > 0 && step.duration_s <= 100)) throw new Error("The robot_move_joints action needs duration_s, more than 0 and at most 100.");
-            if (!Array.isArray(step.joint_position) || !step.joint_position.every((x) => Number.isFinite(x))) throw new Error("joint_position must be an array of numbers.");
-            await this.tools.check(service, step.object, "robot", "", step.joint_position);
+            if (!isRef(step.joint_position) && !(Array.isArray(step.joint_position) && step.joint_position.every((x) => Number.isFinite(x)))) throw new Error("joint_position must be an array of numbers, or a $scratchpad reference.");
+            await this.tools.check(service, step.object, "robot", "", step.joint_position, undefined, pending);
             break;
         }
     }
@@ -926,23 +932,29 @@ export class SequenceRunner
         case "noop":
             return null;
         case "get_property":
-            return (await this.tools.getProperty(s, step.object, step.name!)).value;
+        {
+            const r = await this.tools.getProperty(s, step.object, step.name!, step.store_result);
+            return "value" in r ? r.value : r;
+        }
         case "set_property":
             await this.tools.setProperty(s, step.object, step.name!, step.value);
             return null;
         case "call_function":
         {
             // The function's return value itself, or for a generator, how it ran and its last results
-            const r = await this.tools.callFunction(s, step.object, step.name!, step.arguments ?? [], step.generator_inputs, step.timeout_s ?? 60, signal);
+            const r = await this.tools.callFunction(s, step.object, step.name!, step.arguments ?? [], step.generator_inputs, step.timeout_s ?? 60, signal, step.store_result);
             return "result" in r ? r.result : r;
         }
         case "read_wire":
-            return await this.tools.readWire(s, step.object, step.name!);
+            return await this.tools.readWire(s, step.object, step.name!, step.store_result);
         case "write_wire":
             await this.tools.writeWire(s, step.object, step.name!, step.value);
             return null;
         case "read_events":
-            return (await this.tools.readEvents(s, step.clear ?? true, step.limit ?? 50, step.name)).events;
+        {
+            const r = await this.tools.readEvents(s, step.clear ?? true, step.limit ?? 50, step.name, step.store_result);
+            return "events" in r ? r.events : r;
+        }
         case "robot_move_joints":
             return await this.tools.robotMoveJoints(s, step.object, step.joint_position!, step.duration_s!, signal);
         case "wait_until":
