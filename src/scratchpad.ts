@@ -426,7 +426,7 @@ export class Scratchpad
             catch (e)
             {
                 if (!(e instanceof CodecError)) throw e;
-                throw new CodecError("", `${e.message} (from scratchpad ${ref}, a ${this.typeText(at.info)})`);
+                throw new CodecError("", `${e.message} (from scratchpad ${ref}${at.info ? `, a ${this.typeText(at.info)}` : ""})`);
             }
         };
     }

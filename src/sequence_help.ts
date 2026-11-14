@@ -30,7 +30,7 @@ export const HELP_TOPIC_SUMMARIES: Record<HelpTopic, string> = {
     on_stop: "cleanup steps after an early end, and querying how the sequence ended with _sequence",
     skipping: "only_if on the outcomes of earlier labelled steps",
     events: "which step takes an event, events received earlier, and new_events_only",
-    scratchpad: "passing a result from one step to a later one, such as an image or a robot pose, with store_result and $scratchpad",
+    scratchpad: "passing a result to a later step with store_result and $scratchpad",
     examples: "complete start_sequence calls"
 };
 

@@ -25,6 +25,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 const ROOT = process.cwd();
 const TEST_SERVICE = "RobotRaconteurTestService";
 const ROBOT_TYPE = "com.robotraconteur.robotics.robot.Robot";
+const ROUNDTRIP = "roundtrip";
 const processes: ChildProcess[] = [];
 
 function start(command: string, args: string[]): ChildProcess
@@ -153,8 +154,10 @@ before(async () =>
     start("python3", ["test/services/loopback_robot.py", "--nodename", "robot_b", "--port", "52702"]);
     await waitForPort(52702);
     start("python3", ["-u", "test/services/rr_test_server.py"]);
+    start("python3", ["test/services/roundtrip_service.py"]);
+    await waitForPort(52710);
     bridge = await startBridge();
-    await discover(bridge, ["reynard", "reynard_diagnostics", "robot_a.robot", "robot_b.robot", TEST_SERVICE]);
+    await discover(bridge, ["reynard", "reynard_diagnostics", "robot_a.robot", "robot_b.robot", TEST_SERVICE, ROUNDTRIP]);
 }, { timeout: 180000 });
 
 after(async () =>
@@ -168,12 +171,18 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("offers a fixed list of tools", async () =>
     {
         const { tools } = await bridge.listTools();
-        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_start_sequence", "robotraconteur_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
+        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_scratchpad", "robotraconteur_start_sequence", "robotraconteur_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
         for (const t of tools) assert.ok((t.description?.length ?? 0) > 20, t.name);
         // The tool list is loaded on every turn, so the detailed sequence rules are in robotraconteur_help
         const size = (name: string) => JSON.stringify(tools.find((t) => t.name === name)).length;
         assert.ok(size("robotraconteur_start_sequence") < 13000, `start_sequence is ${size("robotraconteur_start_sequence")} characters`);
-        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 28000, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
+        // 28000 before the scratchpad, which adds about 1.7 K
+        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 29700, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
+        // The scratchpad adds little to the list: its tool, and a short store_result on five schemas
+        const store_result = tools.reduce((n, t) => n + JSON.stringify(t).split('"store_result"').length - 1, 0);
+        const added = size("robotraconteur_scratchpad") + tools.reduce((n, t) => n + (JSON.stringify(t).match(/"store_result":\{[^}]*\}/g) ?? []).join("").length, 0);
+        assert.equal(store_result, 5);
+        assert.ok(added < 1600, `the scratchpad adds ${added} characters`);
     });
 
     test("sequence help gives the rules by topic", async () =>
@@ -182,10 +191,10 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.match(categories, /- sequences: /);
         assert.match(categories, /- standard_service_types: /);
         const list = (await call(bridge, "robotraconteur_help", { category: "sequences" })).content[0]!.text;
-        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"]) assert.match(list, new RegExp(`- ${topic}: `));
-        const all = await call(bridge, "robotraconteur_help", { topics: ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"] });
+        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "scratchpad", "examples"]) assert.match(list, new RegExp(`- ${topic}: `));
+        const all = await call(bridge, "robotraconteur_help", { topics: ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "scratchpad", "examples"] });
         const text = all.content[0]!.text;
-        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"]) assert.match(text, new RegExp(`## ${topic}\n`));
+        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "scratchpad", "examples"]) assert.match(text, new RegExp(`## ${topic}\n`));
         const timing = (await call(bridge, "robotraconteur_help", { topics: ["timing"] })).content[0]!.text;
         assert.match(timing, /max_late_s, counted as at_s is, defaults to at_s/);
         assert.doesNotMatch(timing, /## events/);
@@ -1745,5 +1754,118 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const listed = (await ok(bridge, "robotraconteur_sequence_status", {})).sequences;
         assert.equal(listed[0].sequence_id, sequence_id);
         assert.equal(listed[0].results, 300);
+    });
+});
+
+describe("the scratchpad", { timeout: 300000 }, () =>
+{
+    const N = 4 * 1024 * 1024;
+
+    test("a camera sized value goes from one call to another unchanged, without passing through the model", async () =>
+    {
+        const expected = (await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest_of", arguments: [N, 3] })).result;
+        const made = await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "make_frame", arguments: [N, 3], store_result: "img" });
+        assert.equal(made.result, undefined);
+        assert.equal(made.stored.key, "img");
+        assert.equal(made.stored.type, "experimental.roundtrip.Frame");
+        assert.ok(made.stored.bytes > N);
+        assert.ok(JSON.stringify(made).length < 1000, JSON.stringify(made));
+
+        const digest = await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest", arguments: [{ $scratchpad: "img" }] });
+        assert.equal(digest.result, expected);
+
+        // Through a property and back
+        await ok(bridge, "robotraconteur_set_property", { service: ROUNDTRIP, name: "frame", value: { $scratchpad: "img" } });
+        await ok(bridge, "robotraconteur_get_property", { service: ROUNDTRIP, name: "frame", store_result: "back" });
+        assert.equal((await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest", arguments: { f: { $scratchpad: "back" } } })).result, expected);
+
+        // Read in part, and changed in place
+        const width = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "img.width" });
+        assert.deepEqual(width, { path: "img.width", type: "uint32", value: N });
+        const whole = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "img" });
+        assert.equal(whole.value.data.truncated, true);
+        await ok(bridge, "robotraconteur_scratchpad", { action: "set", path: "img.width", value: 2048 });
+        await ok(bridge, "robotraconteur_scratchpad", { action: "set", path: "img.height", value: 2048 });
+        const changed = (await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest", arguments: [{ $scratchpad: "img" }] })).result;
+        assert.equal(changed, expected.replace(`${N}x1`, "2048x2048"));
+
+        // A struct given in JSON can take one field from the scratchpad
+        const mixed = await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest", arguments: [{ width: N, height: 1, encoding: "mono8", data: { $scratchpad: "back.data" } }] });
+        assert.equal(mixed.result, expected);
+
+        const listed = await ok(bridge, "robotraconteur_scratchpad", { action: "list" });
+        assert.deepEqual(listed.keys.map((k: { key: string }) => k.key).sort(), ["back", "img"]);
+        await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "back" });
+        await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "img" });
+    });
+
+    test("mistakes with the scratchpad are explained", async () =>
+    {
+        await fails(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest", arguments: [{ $scratchpad: "nothing" }] }, /no scratchpad key "nothing"/);
+        await fails(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "make_frame", arguments: [4, 1], store_result: "a.b" }, /store_result must be a key/);
+        await ok(bridge, "robotraconteur_scratchpad", { action: "set", path: "words", value: "not numbers" });
+        await fails(bridge, "robotraconteur_robot_move_joints", { service: "robot_a.robot", joint_position: { $scratchpad: "words" }, duration_s: 1 }, /joint_position\[0\]: expected a double but got "not numbers" \(from scratchpad words\)/);
+        await fails(bridge, "robotraconteur_scratchpad", { action: "get" }, /get needs path/);
+        await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "words" });
+    });
+
+    test("a large value that would be summarized can be kept and read in parts", async () =>
+    {
+        const kept = await ok(bridge, "robotraconteur_get_property", { service: TEST_SERVICE, name: "i32_huge", store_result: "huge" });
+        assert.equal(kept.stored.type, "int32[]");
+        const part = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "huge[2621439]" });
+        assert.equal(typeof part.value, "number");
+        await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "huge" });
+    });
+
+    test("a pose read from the robot is moved back to", async () =>
+    {
+        const service = "robot_a.robot";
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0.1, 0.1, 0.1, 0, 0, 0], duration_s: 0.5 });
+        const read = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state", store_result: "home" });
+        assert.equal(read.value, undefined);
+        assert.ok(read.read_at);
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        const moved = await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: { $scratchpad: "home.joint_position" }, duration_s: 0.5 });
+        moved.final_position.forEach((x: number, i: number) => assert.ok(Math.abs(x - [0.1, 0.1, 0.1, 0, 0, 0][i]!) < 1e-3, `joint ${i}: ${x}`));
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+    });
+
+    test("a sequence keeps waypoints and moves through them", async () =>
+    {
+        const service = "robot_a.robot";
+        const waypoints = [1, 2, 3].map((i) => [0, 1, 2, 3, 4, 5].map((j) => i * 0.05 * (j % 2 === 0 ? 1 : -1)));
+        const expected = (await ok(bridge, "robotraconteur_call_function", { service: ROUNDTRIP, name: "digest_waypoints", arguments: [waypoints] })).result;
+        const r = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 30, detail: "full", sequences: [{ steps: [
+            { action: "call_function", service: ROUNDTRIP, name: "make_waypoints", arguments: [3, 6], store_result: "wp", label: "made" },
+            ...[0, 1, 2].map((i) => ({ action: "robot_move_joints", service, joint_position: { $scratchpad: `wp[${i}]` }, duration_s: 0.3 })),
+            { action: "call_function", service: ROUNDTRIP, name: "digest_waypoints", arguments: [{ $scratchpad: "wp" }], label: "digest" },
+            { action: "call_function", service: ROUNDTRIP, name: "stream_waypoints", arguments: [2, 6], store_result: "streamed", label: "streamed" }
+        ] }] });
+        const seq = r.sequences[0];
+        assert.equal(seq.state, "completed", JSON.stringify(seq));
+        const result = (label: string) => seq.results.find((x: { label?: string }) => x.label === label).result;
+        assert.equal(result("made").stored.type, "double[]{list}");
+        assert.equal(result("digest"), expected);
+        assert.equal(result("streamed").stored.type, "double[]{list}");
+        assert.equal(result("streamed").completed, true);
+        const last = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" });
+        last.value.joint_position.forEach((x: number, i: number) => assert.ok(Math.abs(x - waypoints[2]![i]!) < 1e-3, `joint ${i}: ${x}`));
+        const streamed = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "streamed[1]" });
+        assert.deepEqual(streamed.value, waypoints[1]);
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+    });
+
+    test("a sequence that uses a key nothing stores is refused before it starts", async () =>
+    {
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ steps: [
+            { action: "call_function", service: ROUNDTRIP, name: "digest", arguments: [{ $scratchpad: "never_stored" }] }
+        ] }] }, /there is no scratchpad key "never_stored", and no step stores it.*The sequence was not started\. See robotraconteur_help topic scratchpad\./);
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ steps: [
+            { action: "robot_move_joints", service: "robot_a.robot", joint_position: { $scratchpad: "never_stored" }, duration_s: 1 }
+        ] }] }, /never_stored/);
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ steps: [
+            { action: "set_property", service: ROUNDTRIP, name: "frame", value: { width: 1 }, store_result: "x" }
+        ] }] }, /does not use store_result/);
     });
 });

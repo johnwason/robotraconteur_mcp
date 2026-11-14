@@ -41,7 +41,7 @@ async function respond(run: () => Promise<Result> | Result)
 const service = z.string().describe("Name of the service, as listed by robotraconteur_discover");
 const object = z.string().optional().describe("Path to a sub object, such as arm or arm.tool[0]. Leave unset for the root object");
 const name = (kind: string) => z.string().describe(`Name of the ${kind}, as listed by robotraconteur_describe`);
-const store_result = z.string().optional().describe("Keep the result in the scratchpad under this key and return only a summary. See robotraconteur_scratchpad");
+const store_result = z.string().optional().describe("Keep the result under this key in robotraconteur_scratchpad");
 const ref = z.strictObject({ $scratchpad: z.string() });
 const joint_position = z.union([z.array(z.number()), ref]);
 
@@ -84,7 +84,7 @@ const step = z.strictObject({
     combine: z.record(z.string(), z.unknown()).optional().describe("With watch, a MongoDB query over the entries by key, each true or false, such as { \"msg\": true, \"arm_ok\": true }. robotraconteur_help topic: waiting"),
     check_every_s: z.number().min(SEQUENCE_LIMITS.minEvery).optional().describe("For wait_until and stop_when, how often to read wires and properties. The default is 0.05"),
     clear: z.boolean().optional().describe("For read_events, remove the returned events. The default is true"),
-    store_result: z.string().optional().describe("For get_property, read_wire, call_function, and read_events, keep the result in the scratchpad under this key. robotraconteur_help topic: scratchpad"),
+    store_result: z.string().optional().describe("Keep the result in the scratchpad under this key. robotraconteur_help topic: scratchpad"),
     limit: z.number().int().positive().max(200).optional().describe("For read_events, the most events to return. The default is 50"),
     at_s: z.number().min(0).optional().describe("Start this many seconds after the sequence started, or with after, after that step ended. The step must start on time or it fails. robotraconteur_help topic: timing"),
     target: z.string().optional().describe("For end_stop_when, the label of the stop_when to end, or none to end all"),
@@ -178,7 +178,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_scratchpad", {
-        description: "Values kept in this server, so that large data such as images and trajectories can go from one service to another without passing through you. Keep a result with store_result. Use a kept value in place of any value, argument, or joint_position as { \"$scratchpad\": \"path\" }, where path is a key, optionally with fields and indexes, such as img or state.joint_position[2]. Actions: list; get, the value at path; set, value at path, where value can be a $scratchpad reference to copy; delete, a key. Kept until the server restarts.",
+        description: "Values kept in this server, so that large data such as images can go from one service to another without passing through you. store_result keeps a result, returning a summary. In place of any value or argument, { \"$scratchpad\": \"path\" } uses a kept value, where path is a key with any fields and indexes, such as img or state.joint_position[2]. set writes value at path; a $scratchpad value copies.",
         inputSchema: z.object({
             action: z.enum(["list", "get", "set", "delete"]),
             path: z.string().optional().describe("A key, optionally with fields and indexes"),
