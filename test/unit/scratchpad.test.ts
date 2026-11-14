@@ -17,7 +17,7 @@ import test from "node:test";
 import { parseServiceDefinition, parseTypeDefinition, VarValue } from "robotraconteur";
 import { TypeContext } from "robotraconteur/internal";
 import { Codec } from "../../src/codec.js";
-import { parsePath, Scratchpad, SCRATCHPAD_LIMITS } from "../../src/scratchpad.js";
+import { AUTO_PREFIX, parsePath, Scratchpad, SCRATCHPAD_LIMITS } from "../../src/scratchpad.js";
 
 const camera = parseServiceDefinition(`
 service example.camera
@@ -257,5 +257,47 @@ test("keys and sizes are limited", () =>
     finally
     {
         SCRATCHPAD_LIMITS.maxKeys = keys;
+    }
+});
+
+test("results stored automatically keep the latest few, and give way to the model's own keys", () =>
+{
+    const pad = new Scratchpad();
+    const info = { type: t("uint8[]"), types, scope: camera };
+    const keys = Array.from({ length: SCRATCHPAD_LIMITS.maxAuto + 2 }, () => pad.storeAuto(new Uint8Array(10), info));
+    assert.deepEqual(keys.slice(0, 2), [`${AUTO_PREFIX}1`, `${AUTO_PREFIX}2`]);
+    assert.equal(pad.has(`${AUTO_PREFIX}2`), false);
+    assert.equal(pad.has(`${AUTO_PREFIX}3`), true);
+    assert.equal((pad.list().keys as unknown[]).length, SCRATCHPAD_LIMITS.maxAuto);
+    assert.throws(() => pad.get(`${AUTO_PREFIX}1`), /replaced by later large results/);
+
+    // The model cannot write to them, but can copy one to keep it, and delete them
+    assert.throws(() => pad.store(`${AUTO_PREFIX}99`, 1), /hold results stored automatically/);
+    assert.throws(() => pad.set(`${AUTO_PREFIX}3[0]`, 1), /copy it to a key of your own, with set and value \{ "\$scratchpad": "_auto_3" \}/);
+    pad.set("kept", { $scratchpad: `${AUTO_PREFIX}3` });
+    assert.equal(pad.get("kept").type, "uint8[]");
+    pad.delete(`${AUTO_PREFIX}3`);
+    assert.equal(pad.has(`${AUTO_PREFIX}3`), false);
+
+    // When space runs short, the oldest automatic results are evicted first, and named keys never
+    const max = SCRATCHPAD_LIMITS.maxBytes;
+    SCRATCHPAD_LIMITS.maxBytes = 1000;
+    try
+    {
+        const small = new Scratchpad();
+        small.store("mine", new Uint8Array(400), info);
+        const a = small.storeAuto(new Uint8Array(400), info)!;
+        const b = small.storeAuto(new Uint8Array(400), info)!;
+        assert.equal(small.has(a), false, "the older automatic result made room");
+        assert.equal(small.has(b), true);
+        small.store("also_mine", new Uint8Array(400), info);
+        assert.equal(small.has(b), false);
+        assert.equal(small.has("mine"), true);
+        assert.equal(small.storeAuto(new Uint8Array(2000), info), undefined, "one that cannot fit is not kept");
+        assert.equal(small.has("also_mine"), true);
+    }
+    finally
+    {
+        SCRATCHPAD_LIMITS.maxBytes = max;
     }
 });

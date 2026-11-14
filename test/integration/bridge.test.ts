@@ -595,6 +595,16 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.equal(r.value.truncated, true);
         assert.equal(r.value.length, 2621440);
         assert.ok(JSON.stringify(r).length < 64 * 1024);
+        // The full value is kept, so that it is not lost
+        assert.match(r.auto_stored, /^_auto_\d+$/);
+        assert.match(r.note, new RegExp(`kept in robotraconteur_scratchpad as ${r.auto_stored}`));
+        const part = await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: `${r.auto_stored}[2621439]` });
+        assert.equal(typeof part.value, "number");
+        // A sequence step does not keep large results by itself
+        const seq = await ok(bridge, "robotraconteur_start_sequence", { wait_s: 30, detail: "full", sequences: [{ steps: [{ action: "get_property", service: TEST_SERVICE, name: "i32_huge", label: "big" }] }] });
+        assert.equal(seq.sequences[0].state, "completed");
+        const keys = (await ok(bridge, "robotraconteur_scratchpad", { action: "list" })).keys.map((k: { key: string }) => k.key);
+        assert.equal(keys.filter((k: string) => k.startsWith("_auto_")).length, 1, keys.join());
     });
 
     test("mistakes are explained so that the model can correct them", async () =>
@@ -1795,7 +1805,7 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         assert.equal(mixed.result, expected);
 
         const listed = await ok(bridge, "robotraconteur_scratchpad", { action: "list" });
-        assert.deepEqual(listed.keys.map((k: { key: string }) => k.key).sort(), ["back", "img"]);
+        assert.deepEqual(listed.keys.map((k: { key: string }) => k.key).filter((k: string) => !k.startsWith("_auto_")).sort(), ["back", "img"]);
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "back" });
         await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "img" });
     });

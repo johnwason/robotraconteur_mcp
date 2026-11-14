@@ -160,6 +160,21 @@ export class BridgeTools
         return new Codec(stub.context.types, this.scratchpad.resolver(pending));
     }
 
+    /**
+     * A value as JSON, with large arrays summarized if it is too big to return. With auto, the full value
+     * of a summarized one is kept in the scratchpad, so that it is not lost
+     */
+    private output(stub: ServiceStub, value: unknown, t: TypeDefinition, auto: boolean): { value: unknown; auto_stored?: string; note?: string }
+    {
+        const codec = new Codec(stub.context.types);
+        const full = codec.toJson(value, t, scope(stub));
+        if (JSON.stringify(full).length <= MAX_RESULT_BYTES) return { value: full };
+        const summary = codec.toJson(value, t, scope(stub), SUMMARIZED);
+        const key = auto ? this.scratchpad.storeAuto(value, { type: t, types: stub.context.types, scope: scope(stub) }) : undefined;
+        if (key === undefined) return { value: summary };
+        return { value: summary, auto_stored: key, note: `Too large to return in full, so large arrays are summarized. The full value is kept in robotraconteur_scratchpad as ${key}, which later large results may replace. To keep it, copy it to a key of your own with set.` };
+    }
+
     /** Keep a value from a service in the scratchpad, with its type */
     private keep(stub: ServiceStub, key: string, value: unknown, type: TypeDefinition): Record<string, unknown>
     {
@@ -211,14 +226,15 @@ export class BridgeTools
         return describeObject(await this.registry.resolve(service, object), member_name);
     }
 
-    async getProperty(service: string, object: string | undefined, name: string, store_result?: string): Promise<Record<string, unknown>>
+    /** auto keeps a result too large to return in the scratchpad, for a direct call rather than a sequence step */
+    async getProperty(service: string, object: string | undefined, name: string, store_result?: string, auto = false): Promise<Record<string, unknown>>
     {
         this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["property"]);
         const value = await stub.getProperty(name);
         if (store_result !== undefined) return { stored: this.keep(stub, store_result, value, m.type!) };
-        return { value: encode(stub, value, m.type) };
+        return this.output(stub, value, m.type!, auto);
     }
 
     async setProperty(service: string, object: string | undefined, name: string, value: unknown): Promise<Record<string, unknown>>
@@ -364,7 +380,7 @@ export class BridgeTools
         }
     }
 
-    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, store_result?: string): Promise<Record<string, unknown>>
+    async callFunction(service: string, object: string | undefined, name: string, args: unknown, generator_inputs: unknown[] | undefined, timeout_s: number, signal?: AbortSignal, store_result?: string, auto = false): Promise<Record<string, unknown>>
     {
         this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
@@ -401,7 +417,9 @@ export class BridgeTools
             return { ...run, results: undefined, stored };
         }
         if (store_result !== undefined) return { stored: this.keep(stub, store_result, result, m.type!) };
-        return { result: m.type?.type === "void" ? null : encode(stub, result, m.type) };
+        if (m.type?.type === "void") return { result: null };
+        const { value, ...kept } = this.output(stub, result, m.type!, auto);
+        return { result: value, ...kept };
     }
 
     private timestamp(t: { seconds: bigint; nanoseconds: number }): string
@@ -430,13 +448,13 @@ export class BridgeTools
         return `${name} has not updated for at least ${Math.round(u.seconds)} seconds: its seqno has stayed at ${u.seqno} in every read since ${new Date(u.since).toISOString()}, and may have stopped changing before then. The device may have stopped sending new values, such as a driver that is no longer running, so this value is out of date.`;
     }
 
-    async readWire(service: string, object: string | undefined, name: string, store_result?: string): Promise<Record<string, unknown>>
+    async readWire(service: string, object: string | undefined, name: string, store_result?: string, auto = false): Promise<Record<string, unknown>>
     {
         this.checkKey(store_result);
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire"]);
         const { value, timestamp } = await stub.peekWireInValue(name);
-        const out: Record<string, unknown> = store_result === undefined ? { value: encode(stub, value, m.type) } : { stored: this.keep(stub, store_result, value, m.type!) };
+        const out: Record<string, unknown> = store_result === undefined ? this.output(stub, value, m.type!, auto) : { stored: this.keep(stub, store_result, value, m.type!) };
         out.read_at = this.timestamp(timestamp);
         const unchanged = this.unchangedFor(service, object, name, value);
         if (unchanged && unchanged.seconds >= NOT_UPDATING_S) out.not_updating = this.notUpdating(name, unchanged);

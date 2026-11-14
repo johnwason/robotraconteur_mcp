@@ -54,7 +54,10 @@ interface Located
     where: string;
 }
 
-export const SCRATCHPAD_LIMITS = { maxKeys: 100, maxBytes: 256 * 1024 * 1024 };
+/** maxKeys counts the keys given by the model. maxAuto counts the results stored automatically, which are evicted first */
+export const SCRATCHPAD_LIMITS = { maxKeys: 100, maxBytes: 256 * 1024 * 1024, maxAuto: 8 };
+/** The start of the keys of results stored automatically, which the model cannot use for its own keys */
+export const AUTO_PREFIX = "_auto_";
 const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Results larger than this are returned with large arrays summarized, as the read tools do */
 const MAX_RESULT_BYTES = 64 * 1024;
@@ -144,6 +147,9 @@ function withoutContainer(t: TypeDefinition): TypeDefinition
 export class Scratchpad
 {
     private entries = new Map<string, Entry>();
+    /** The keys of results stored automatically, oldest first */
+    private auto: string[] = [];
+    private next_auto = 1;
 
     private total(): number
     {
@@ -152,20 +158,62 @@ export class Scratchpad
         return n;
     }
 
-    /** Refuse a change that would make the scratchpad larger than its limit */
+    /**
+     * Refuse a change that would make the scratchpad larger than its limit, after evicting results
+     * stored automatically, oldest first, to make room
+     */
     private checkSize(change: number): void
     {
-        const total = this.total();
+        let total = this.total();
+        while (total + change > SCRATCHPAD_LIMITS.maxBytes && this.auto.length > 0)
+        {
+            total -= this.entries.get(this.auto[0]!)!.bytes;
+            this.evict(this.auto[0]!);
+        }
         if (total + change <= SCRATCHPAD_LIMITS.maxBytes) return;
         throw new Error(`The scratchpad would hold ${Math.round((total + change) / 1e6)} MB, over its limit of ${SCRATCHPAD_LIMITS.maxBytes / 1e6} MB. Delete keys that are no longer needed.`);
+    }
+
+    private evict(key: string): void
+    {
+        this.entries.delete(key);
+        this.auto = this.auto.filter((k) => k !== key);
+    }
+
+    private refuseAuto(key: string): void
+    {
+        if (key.startsWith(AUTO_PREFIX)) throw new Error(`Keys starting with ${AUTO_PREFIX} hold results stored automatically, which later large results replace. To keep one, copy it to a key of your own, with set and value { "$scratchpad": "${key.split(/[.[]/)[0]}" }.`);
+    }
+
+    /**
+     * Keep a result too large to return, under the next automatic key, evicting the oldest automatic
+     * keys to stay within the limits. Returns the key, or undefined if it cannot fit
+     */
+    storeAuto(value: unknown, info: ValueType): string | undefined
+    {
+        const bytes = estimateBytes(value);
+        while (this.auto.length >= SCRATCHPAD_LIMITS.maxAuto) this.evict(this.auto[0]!);
+        try
+        {
+            this.checkSize(bytes);
+        }
+        catch
+        {
+            return undefined;
+        }
+        const key = `${AUTO_PREFIX}${this.next_auto++}`;
+        this.entries.set(key, { value, info, bytes, time: Date.now() });
+        this.auto.push(key);
+        return key;
     }
 
     /** Keep a value under a key, replacing any value there. info is its type, for a value from a service */
     store(key: string, value: unknown, info?: ValueType): Record<string, unknown>
     {
         if (!KEY_PATTERN.test(key)) throw new Error(`"${key}" cannot be a scratchpad key. Use letters, digits, and _, not starting with a digit.`);
+        this.refuseAuto(key);
         const old = this.entries.get(key);
-        if (!old && this.entries.size >= SCRATCHPAD_LIMITS.maxKeys) throw new Error(`The scratchpad already has ${SCRATCHPAD_LIMITS.maxKeys} keys, its limit. Delete keys that are no longer needed.`);
+        if (!old && this.entries.size - this.auto.length >= SCRATCHPAD_LIMITS.maxKeys) throw new Error(`The scratchpad already has ${SCRATCHPAD_LIMITS.maxKeys} keys, its limit. Delete keys that are no longer needed.`);
         const bytes = estimateBytes(value);
         this.checkSize(bytes - (old?.bytes ?? 0));
         this.entries.set(key, { value, info, bytes, time: Date.now() });
@@ -211,14 +259,16 @@ export class Scratchpad
 
     delete(key: string): Record<string, unknown>
     {
-        if (!this.entries.delete(key)) throw this.missing(key);
+        if (!this.entries.has(key)) throw this.missing(key);
+        this.evict(key);
         return { deleted: key };
     }
 
     private missing(key: string): Error
     {
         const keys = [...this.entries.keys()];
-        return new Error(`There is no scratchpad key "${key}". ${keys.length ? `The keys are: ${keys.join(", ")}.` : "The scratchpad is empty."} Store a value with store_result, or with robotraconteur_scratchpad set.`);
+        const evicted = key.startsWith(AUTO_PREFIX) ? " Results stored automatically are replaced by later large results, oldest first." : "";
+        return new Error(`There is no scratchpad key "${key}".${evicted} ${keys.length ? `The keys are: ${keys.join(", ")}.` : "The scratchpad is empty."} Store a value with store_result, or with robotraconteur_scratchpad set.`);
     }
 
     /** Find the value at a path, with its type and the place it is kept */
@@ -349,6 +399,7 @@ export class Scratchpad
     set(path: string, value: unknown): Record<string, unknown>
     {
         const { key, segments } = parsePath(path);
+        this.refuseAuto(key);
         if (segments.length === 0)
         {
             if (isRef(value))

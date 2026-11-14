@@ -125,7 +125,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
         description: "Read a property of a service.",
         inputSchema: z.object({ service, object, name: name("property"), store_result }),
         annotations: { readOnlyHint: true }
-    }, ({ service: s, object: o, name: n, store_result: k }) => respond(() => tools.getProperty(s, o, n, k)));
+    }, ({ service: s, object: o, name: n, store_result: k }) => respond(() => tools.getProperty(s, o, n, k, true)));
 
     server.registerTool("robotraconteur_set_property", {
         description: "Write a property of a service. Enums can be given by name. 64-bit integers can be given as decimal strings. " + PARALLEL_NOTE,
@@ -143,13 +143,13 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
             timeout_s: z.number().positive().optional().describe("For a generator, abort after this many seconds. The default is 60"),
             store_result
         })
-    }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60, ctx.mcpReq.signal, a.store_result)));
+    }, (a, ctx) => respond(() => tools.callFunction(a.service, a.object, a.name, a.arguments, a.generator_inputs, a.timeout_s ?? 60, ctx.mcpReq.signal, a.store_result, true)));
 
     server.registerTool("robotraconteur_read_wire", {
         description: "Read the latest value of a wire. Wires carry continuously updated data such as robot state and sensor readings. read_at is when it was read, not when the device last updated it. not_updating appears when a standard state's seqno has not changed for 5 s: the device stopped sending.",
         inputSchema: z.object({ service, object, name: name("wire"), store_result }),
         annotations: { readOnlyHint: true }
-    }, ({ service: s, object: o, name: n, store_result: k }) => respond(() => tools.readWire(s, o, n, k)));
+    }, ({ service: s, object: o, name: n, store_result: k }) => respond(() => tools.readWire(s, o, n, k, true)));
 
     server.registerTool("robotraconteur_write_wire", {
         description: "Set the value being sent on a wire.",
@@ -178,7 +178,7 @@ export function createServer(tools: BridgeTools, sequences = new SequenceRunner(
     }, (a, ctx) => respond(() => tools.robotMoveJoints(a.service, a.object, a.joint_position, a.duration_s, ctx.mcpReq.signal)));
 
     server.registerTool("robotraconteur_scratchpad", {
-        description: "Values kept in this server, so that large data such as images can go from one service to another without passing through you. store_result keeps a result, returning it if small, else a summary. In place of any value or argument, { \"$scratchpad\": \"path\" } uses a kept value, where path is a key with any fields and indexes, such as img or state.joint_position[2]. set writes value at path; a $scratchpad value copies.",
+        description: "Values kept in this server, so large data such as images can pass between services without going through you. store_result keeps a result, returning it if small, else a summary. A result too large to return is kept as _auto_N. In any value or argument, { \"$scratchpad\": \"path\" } uses a kept value; path is a key with any fields and indexes, such as state.joint_position[2]. set writes value at path; a $scratchpad value copies.",
         inputSchema: z.object({
             action: z.enum(["list", "get", "set", "delete"]),
             path: z.string().optional().describe("A key, optionally with fields and indexes"),
