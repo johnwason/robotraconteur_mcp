@@ -168,8 +168,49 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("offers a fixed list of tools", async () =>
     {
         const { tools } = await bridge.listTools();
-        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_start_sequence", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
+        assert.deepEqual(tools.map((t) => t.name), ["robotraconteur_discover", "robotraconteur_describe", "robotraconteur_get_property", "robotraconteur_set_property", "robotraconteur_call_function", "robotraconteur_read_wire", "robotraconteur_write_wire", "robotraconteur_read_events", "robotraconteur_robot_move_joints", "robotraconteur_start_sequence", "robotraconteur_help", "robotraconteur_sequence_status", "robotraconteur_cancel_sequence"]);
         for (const t of tools) assert.ok((t.description?.length ?? 0) > 20, t.name);
+        // The tool list is loaded on every turn, so the detailed sequence rules are in robotraconteur_help
+        const size = (name: string) => JSON.stringify(tools.find((t) => t.name === name)).length;
+        assert.ok(size("robotraconteur_start_sequence") < 13000, `start_sequence is ${size("robotraconteur_start_sequence")} characters`);
+        assert.ok(tools.reduce((n, t) => n + JSON.stringify(t).length, 0) < 28000, `the whole tool list is ${tools.reduce((n, t) => n + JSON.stringify(t).length, 0)} characters`);
+    });
+
+    test("sequence help gives the rules by topic", async () =>
+    {
+        const categories = (await call(bridge, "robotraconteur_help", {})).content[0]!.text;
+        assert.match(categories, /- sequences: /);
+        assert.match(categories, /- standard_service_types: /);
+        const list = (await call(bridge, "robotraconteur_help", { category: "sequences" })).content[0]!.text;
+        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"]) assert.match(list, new RegExp(`- ${topic}: `));
+        const all = await call(bridge, "robotraconteur_help", { topics: ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"] });
+        const text = all.content[0]!.text;
+        for (const topic of ["actions", "timing", "waiting", "conditions", "stopping", "on_stop", "skipping", "events", "examples"]) assert.match(text, new RegExp(`## ${topic}\n`));
+        const timing = (await call(bridge, "robotraconteur_help", { topics: ["timing"] })).content[0]!.text;
+        assert.match(timing, /max_late_s, counted as at_s is, defaults to at_s/);
+        assert.doesNotMatch(timing, /## events/);
+        const bad = await call(bridge, "robotraconteur_help", { topics: ["nope"] });
+        assert.equal(bad.isError, true);
+        assert.match(bad.content[0]!.text, /category standard_service_types lists them/);
+    });
+
+    test("help gives the standard service definitions' documentation, and describe points to it", async () =>
+    {
+        const list = (await call(bridge, "robotraconteur_help", { category: "standard_service_types" })).content[0]!.text;
+        assert.match(list, /- com\.robotraconteur\.robotics\.robot: /);
+        assert.match(list, /- com\.robotraconteur\.imaging: /);
+        assert.doesNotMatch(list, /## timing/, "a category gives only its own topics");
+        const page = (await call(bridge, "robotraconteur_help", { topics: ["com.robotraconteur.robotics.robot"] })).content[0]!.text;
+        assert.match(page, /## Object: Robot/);
+        assert.match(page, /### Using Statements/, "kept, so other types can be followed to their pages");
+
+        const robot = await ok(bridge, "robotraconteur_describe", { service: "robot_a.robot" });
+        assert.match(robot.standard_docs, /^This uses standard service types.*Read robotraconteur_help topic com\.robotraconteur\.robotics\.robot;/);
+        const trajectory = await ok(bridge, "robotraconteur_describe", { service: "robot_a.robot", member: "execute_trajectory" });
+        assert.match(trajectory.standard_docs, /com\.robotraconteur\.robotics\.trajectory/, "a member's note names the pages of the types it uses");
+        assert.doesNotMatch(trajectory.standard_docs, /robotics\.robot[,;]/);
+        const reynard = await ok(bridge, "robotraconteur_describe", { service: "reynard" });
+        assert.equal(reynard.standard_docs, undefined, "Reynard uses no standard types");
     });
 
     test("finds services and gives them usable names", async () =>
@@ -202,6 +243,54 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
     test("a service name shared by several nodes is rejected, listing them", async () =>
     {
         await fails(bridge, "robotraconteur_describe", { service: "robot" }, /"robot" matches more than one service: robot_a\.robot, robot_b\.robot/);
+    });
+
+    test("the test robot keeps updating with a tool attached, and its endpoint follows the tool", async () =>
+    {
+        const service = "robot_b.robot";
+        const before = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value;
+        const tcp = { rotation: { w: 1, x: 0, y: 0, z: 0 }, translation: { x: 0, y: 0, z: 0.1 } };
+        await ok(bridge, "robotraconteur_call_function", { service, name: "tool_attached", arguments: [0, { tcp, device_info: { device: { name: "gripper" } } }] });
+        try
+        {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const after = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value;
+            assert.ok(BigInt(after.seqno) > BigInt(before.seqno), "robot_state still updates");
+            const moved = Math.hypot(...["x", "y", "z"].map((k) => after.kin_chain_tcp[0].position[k] - before.kin_chain_tcp[0].position[k]));
+            assert.ok(Math.abs(moved - 0.1) < 1e-6, `the endpoint moved ${moved} with the tool`);
+        }
+        finally
+        {
+            await fails(bridge, "robotraconteur_call_function", { service, name: "tool_detached", arguments: [0, "other"] }, /Invalid tool name/);
+            await ok(bridge, "robotraconteur_call_function", { service, name: "tool_detached", arguments: [0, "gripper"] });
+        }
+    });
+
+    test("a robot whose state stopped updating is reported, not moved, and stops a sequence watching it", { timeout: 60000 }, async () =>
+    {
+        start("python3", ["test/services/loopback_robot.py", "--nodename", "robot_frozen", "--port", "52704", "--freeze-after", "0.5"]);
+        await waitForPort(52704);
+        const service = "robot_frozen.robot";
+        await discover(bridge, [service]);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const first = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" });
+        assert.ok(first.read_at, "the read gives when it was read");
+        assert.equal(first.not_updating, undefined, "one read cannot tell");
+        // Properties still answer, as with a driver whose loop died
+        assert.equal((await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" })).value.name, "halt");
+        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0.1, 0, 0, 0, 0, 0], duration_s: 1 }, /robot_state has not updated for 1 second: its seqno stayed at \d+\. The robot's driver may have stopped, so the robot was not moved\./);
+
+        // A stop_when on a fault would never fire on a frozen state, so the sequence stops instead
+        const report = await startSeq({ service, wait_s: 15, steps: [
+            { action: "stop_when", name: "robot_state", condition: { "controller_state.name": "emergency_stop" }, label: "fault" },
+            { action: "wait", seconds: 20 }] });
+        assert.equal(report.state, "stopped", JSON.stringify(report));
+        assert.match(report.stopped_by.error, /robot_state has not updated for at least 5 seconds: its seqno has stayed at \d+ in every read since/);
+        assert.ok(report.elapsed_s < 7, String(report.elapsed_s));
+        const later = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" });
+        assert.equal(later.value.seqno, first.value.seqno);
+        assert.match(later.not_updating, /has not updated for at least \d+ seconds/);
+        await ok(bridge, "robotraconteur_read_wire", { service: "robot_a.robot", name: "robot_state" }).then((r) => assert.equal(r.not_updating, undefined, "a running robot is not flagged"));
     });
 
     test("a service that goes away keeps its name and is explained", { timeout: 150000 }, async () =>
@@ -404,11 +493,36 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
 
         await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
         await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0], duration_s: 1 }, /has 6 joints but 2/);
+        assert.equal(moved.count, undefined, "the waypoint count is not reported");
+        await fails(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 2.5, 0, 0, 0, 0], duration_s: 1 }, /joint_2 \(joint 1\) has a target of 2\.5, outside its limits of -1\.745 to 2\.269/);
+        await fails(bridge, "robotraconteur_start_sequence", { sequences: [{ service, steps: [{ action: "robot_move_joints", joint_position: [0, 0, 0, 0, 0, 7], duration_s: 1 }] }] }, /joint_6 \(joint 5\) has a target of 7, outside its limits.*The sequence was not started\. See robotraconteur_help topic actions\./);
         await fails(bridge, "robotraconteur_robot_move_joints", { service: "reynard", joint_position: [0], duration_s: 1 }, /needs a standard robot, com\.robotraconteur\.robotics\.robot\.Robot, .* but this is experimental\.reynard_the_robot\.Reynard/);
 
         // The other robot was not moved
         const other = await ok(bridge, "robotraconteur_read_wire", { service: "robot_b.robot", name: "robot_state" });
         assert.deepEqual(other.value.joint_position, [0, 0, 0, 0, 0, 0]);
+    });
+
+    test("a cancelled client call stops the robot and halts it", async () =>
+    {
+        const service = "robot_a.robot";
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
+        const abort = new AbortController();
+        const moving = bridge.callTool({ name: "robotraconteur_robot_move_joints", arguments: { service, joint_position: [0.5, 0, 0, 0, 0, 0], duration_s: 4 } }, { signal: abort.signal, timeout: 30000 });
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        abort.abort();
+        await assert.rejects(moving);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const mode = await ok(bridge, "robotraconteur_get_property", { service, name: "command_mode" });
+        assert.equal(mode.value.name, "halt", "the robot was halted");
+        const first = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const later = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position[0];
+        assert.ok(first > 0 && first < 0.5, `stopped partway: ${first}`);
+        assert.equal(later, first, "and stays stopped");
+        // A sequence step with the wrong joint count fails before anything runs
+        await failsStart({ steps: [{ action: "call_function", service: "reynard", name: "say", arguments: ["not said"] }, { action: "robot_move_joints", service, joint_position: [0, 0], duration_s: 1 }] }, /steps\[1\].*has 6 joints but 2/);
+        await ok(bridge, "robotraconteur_robot_move_joints", { service, joint_position: [0, 0, 0, 0, 0, 0], duration_s: 0.5 });
     });
 
     test("uses enums by name and reports them by name", async () =>
@@ -979,7 +1093,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await failsStart({ steps: [{ ...get, only_if: { "nothing.ok": true } }] }, /only_if uses "nothing", which is not the label of an earlier step/);
         await failsStart({ steps: [{ ...get, only_if: { "later.ok": true } }, { ...get, label: "later" }] }, /"later", which is not the label of an earlier step/);
         await failsStart({ steps: [{ ...get, label: "x" }, { ...get, label: "x" }, { ...get, only_if: { "x.ok": true } }] }, /labels more than one step/);
-        await failsStart({ steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: The condition is not a valid MongoDB query/);
+        await failsStart({ steps: [{ ...get, label: "x" }, { ...get, only_if: { "x.ok": { $bogus: 1 } } }] }, /only_if: \$bogus is not allowed in a condition/);
     });
 
     test("a chat message from the diagnostics service stops a show at once, and on_stop reacts", async () =>
@@ -1127,7 +1241,7 @@ describe("timed sequences", { timeout: 300000 }, () =>
         const get = { action: "get_property", service: "reynard", name: "color" };
         await failsStart({ steps: [{ ...get, at: new Date(Date.now() + 2000).toISOString(), max_late_s: 1 }] }, /cannot be used with at/);
         await failsStart({ steps: [{ ...get, at_s: 1, max_late: new Date(Date.now() + 5000).toISOString(), max_late_s: 2 }] }, /not both/);
-        await failsStart({ steps: [{ ...get, at_s: 1, max_late_s: 0.5 }] }, /max_late_s cannot be before the step's at_s/);
+        await failsStart({ steps: [{ ...get, at_s: 1, max_late_s: 0.5 }] }, /max_late_s 0.5 is before the step's at_s 1/);
         await failsStart({ steps: [{ action: "noop", seconds: 1 }] }, /The noop action does not use seconds/);
     });
 
@@ -1216,6 +1330,31 @@ describe("timed sequences", { timeout: 300000 }, () =>
         }
         assert.match(b.results.find((r: any) => r.label === "listen").error, /stopped by the call's stop_when \(show_stop\)/);
         await fails(bridge, "robotraconteur_start_sequence", { stop_when: { service, name: "ev2", condition: {}, at_s: 1 }, sequences: [{ service: "reynard", steps: [{ action: "noop" }] }] }, /at_s/);
+        await fails(bridge, "robotraconteur_start_sequence", { stop_when: { name: "ev2", condition: {} }, sequences: [{ service: "reynard", steps: [{ action: "noop" }] }] }, /The stop_when action needs service/);
+    });
+
+    test("cancel stops a sequence blocked in a plain function call at once", async () =>
+    {
+        // drive_robot with wait blocks for its timeout, as a motion command with wait does
+        const { sequence_id } = await startSeq({ service: "reynard", steps: [{ action: "call_function", name: "drive_robot", arguments: [0, 0, 5, true] }] });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const t = Date.now();
+        const cancelled = await cancelSeq(sequence_id);
+        assert.ok(Date.now() - t < 1000, `the cancel took ${Date.now() - t} ms`);
+        assert.equal(cancelled.state, "cancelled");
+    });
+
+    test("a stop_when with new_events_only leaves earlier events to wait_until", async () =>
+    {
+        await ok(bridge, "robotraconteur_read_events", { service: "reynard" });
+        const report = await startSeq({ wait_s: 5, detail: "full", service: "reynard", steps: [
+            { action: "call_function", service: "reynard_diagnostics", name: "send_message", arguments: ["earlier"] },
+            { action: "wait", seconds: 0.3 },
+            { action: "stop_when", name: "new_message", condition: {}, new_events_only: true },
+            { action: "wait_until", name: "new_message", condition: { message: "earlier" }, timeout_s: 1, label: "got" }
+        ] });
+        assert.equal(report.state, "completed", JSON.stringify(report));
+        assert.equal(report.results.find((r: any) => r.label === "got").result.event.arguments.message, "earlier");
     });
 
     test("cancel_sequence cancels several sequences at once", async () =>
@@ -1367,7 +1506,8 @@ describe("timed sequences", { timeout: 300000 }, () =>
         await failsStart({ steps: [{ ...base, condition: { $where: "true" } }] }, /\$where is not allowed in a condition/);
         await failsStart({ steps: [{ ...base, condition: { $expr: { $function: { body: "x", args: [], lang: "js" } } } }] }, /\$function is not allowed/);
         await failsStart({ steps: [{ ...base, condition: { value: { $regex: "a" } } }] }, /\$regex is not allowed/);
-        await failsStart({ steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /not a valid MongoDB query: .*\$bogus/);
+        await failsStart({ steps: [{ ...base, condition: { value: { $bogus: 1 } } }] }, /\$bogus is not allowed in a condition/);
+        await failsStart({ steps: [{ ...base, condition: { $expr: { $gt: [{ $size: { $range: [0, 1e9] } }, 0] } } }] }, /\$range is not allowed in a condition/);
         await failsStart({ steps: [{ action: "wait_until", service: "reynard", name: "color", condition: {} }] }, /needs timeout_s/);
         await failsStart({ steps: [{ ...base, name: "teleport", condition: {} }] }, /"teleport" is a function, not a wire or property or event/);
     });
@@ -1432,6 +1572,15 @@ describe("timed sequences", { timeout: 300000 }, () =>
 
         // The test service fires each event from its own timer, so they can arrive in any order. The
         // reads take them oldest first, two then one
+        // Without clear, remaining counts only the events after those returned
+        const peeked = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", limit: 2, clear: false });
+        assert.equal(peeked.events.length, 2);
+        assert.equal(peeked.remaining, 1);
+        assert.match(peeked.note, /call with clear true/);
+        const peeked_all = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", clear: false });
+        assert.equal(peeked_all.events.length, 3);
+        assert.equal(peeked_all.remaining, 0);
+        assert.equal(peeked_all.note, undefined);
         const first = await ok(bridge, "robotraconteur_read_events", { service, name: "ev2", limit: 2 });
         assert.equal(first.events.length, 2);
         assert.equal(first.remaining, 1);

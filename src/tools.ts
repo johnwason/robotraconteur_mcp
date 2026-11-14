@@ -47,12 +47,73 @@ function member(stub: ServiceStub, name: string, kinds: string[]): MemberDefinit
     throw new Error(`${stub.objectType} has no ${kinds.join(" or ")} named "${name}". Use robotraconteur_describe to list its members.`);
 }
 
+/**
+ * A wire value whose sequence number has stayed the same for this many seconds has stopped updating.
+ * Robot Raconteur gives the time a wire was read, not when its value last changed, so the sequence
+ * number of a standard state, such as robot_state, is the only sign that a device has stopped sending
+ */
+export const NOT_UPDATING_S = 5;
+/** How long robot_move_joints waits for robot_state to update before refusing to move */
+const ROBOT_STATE_CHECK_S = 1;
+
+/**
+ * The sequence number of a standard state structure, which advances with every new value: seqno,
+ * device_seqno of a DeviceTime, or data_header.seqno of sensor data. Undefined for other values
+ */
+function seqnoOf(value: unknown): string | undefined
+{
+    if (typeof value !== "object" || value === null) return undefined;
+    const v = value as Record<string, unknown>;
+    const header = v.data_header as Record<string, unknown> | null | undefined;
+    const seqno = v.seqno ?? v.device_seqno ?? header?.seqno;
+    return typeof seqno === "bigint" || typeof seqno === "number" ? String(seqno) : undefined;
+}
+
+/** The parts of a standard robot's robot_info that robot_move_joints uses */
+interface RobotInfo
+{
+    joint_info: { joint_identifier?: { name?: string } | null; joint_limits?: { lower?: number; upper?: number } | null }[];
+}
+
+/**
+ * Refuse a target with the wrong joint count, or outside a joint's limits, before anything moves. A
+ * joint whose limits are not given, both zero, or not lower below upper, is not checked
+ */
+function checkJointTarget(info: RobotInfo, target: number[]): void
+{
+    if (info.joint_info.length !== target.length) throw new Error(`The robot has ${info.joint_info.length} joints but ${target.length} positions were given.`);
+    for (const [i, j] of info.joint_info.entries())
+    {
+        const { lower, upper } = j.joint_limits ?? {};
+        if (typeof lower !== "number" || typeof upper !== "number" || !(lower < upper)) continue;
+        const value = target[i]!;
+        if (value >= lower && value <= upper) continue;
+        const name = j.joint_identifier?.name ? `${j.joint_identifier.name} (joint ${i})` : `Joint ${i}`;
+        throw new Error(`${name} has a target of ${value}, outside its limits of ${lower} to ${upper} from robot_info.joint_info. Give a target within the limits.`);
+    }
+}
+
 /** robot_move_joints needs a standard robot. Says which type is needed and what the service is instead */
 function robotMember(stub: ServiceStub): MemberDefinition
 {
     const m = stub.context.findMember(stub.objectType, "execute_trajectory");
     if (m && m.kind === "function") return m;
     throw new Error(`robot_move_joints needs a standard robot, com.robotraconteur.robotics.robot.Robot, with an execute_trajectory function, but this is ${stub.objectType}. Use robotraconteur_describe to see how to move it.`);
+}
+
+/**
+ * Wait for a request, but stop waiting as soon as the signal aborts. The request itself goes on in
+ * the service, since a plain Robot Raconteur call cannot be stopped once sent
+ */
+export function untilAborted<T>(action: Promise<T>, signal: AbortSignal): Promise<T>
+{
+    return new Promise((resolve, reject) =>
+    {
+        const stop = () => reject(signal.reason);
+        if (signal.aborted) stop();
+        signal.addEventListener("abort", stop, { once: true });
+        action.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+    });
 }
 
 function scope(stub: ServiceStub)
@@ -78,6 +139,8 @@ function sleep(ms: number): Promise<void>
 export class BridgeTools
 {
     private moving = new Set<string>();
+    /** The last sequence number seen on each wire, and since when, by service, object, and wire */
+    private seqnos = new Map<string, { seqno: string; since: number }>();
 
     constructor(private registry: ServiceRegistry) {}
 
@@ -143,6 +206,11 @@ export class BridgeTools
         if (kind === "robot")
         {
             robotMember(stub);
+            // The joint count is checked now, so that a wrong one fails before anything moves
+            if (Array.isArray(value))
+            {
+                checkJointTarget(await stub.getProperty("robot_info") as RobotInfo, value as number[]);
+            }
             return;
         }
         const m = member(stub, name, [kind]);
@@ -227,7 +295,7 @@ export class BridgeTools
             if (Date.now() > deadline)
             {
                 await stub.callFunctionGenAbort(handle);
-                return { completed: false, reason: `Aborted after ${timeout_s} seconds`, count, results };
+                return { completed: false, reason: `Aborted after ${timeout_s} ${timeout_s === 1 ? "second" : "seconds"}`, count, results };
             }
             if (handle.paramType && inputs && i >= inputs.length)
             {
@@ -261,8 +329,21 @@ export class BridgeTools
         const converted = this.convertArguments(stub, m, args);
         // Checked before the call, because a generator that has started must be closed
         const inputs = this.convertGeneratorInputs(stub, m, generator_inputs);
-        const result = await stub.callFunction(name, converted);
         const generator = m.type?.container === "generator" || m.parameters?.some((p) => p.type.container === "generator");
+        const call = stub.callFunction(name, converted);
+        let result: unknown;
+        try
+        {
+            // A plain call can block for as long as the service takes, such as for a motion with wait,
+            // so a cancel stops waiting for it at once. The service finishes the call on its own
+            result = signal ? await untilAborted(call, signal) : await call;
+        }
+        catch (e)
+        {
+            // A generator that starts after the abort is aborted too, so it does not run unattended
+            if (generator && signal?.aborted) void call.then((h) => stub.callFunctionGenAbort(h as GeneratorHandle)).catch(() => undefined);
+            throw e;
+        }
         if (generator) return this.runGenerator(stub, result as GeneratorHandle, inputs, timeout_s, signal);
         return { result: m.type?.type === "void" ? null : encode(stub, result, m.type) };
     }
@@ -272,12 +353,36 @@ export class BridgeTools
         return new Date(Number(t.seconds) * 1000 + t.nanoseconds / 1e6).toISOString();
     }
 
+    /**
+     * Note a wire value's sequence number, and say how long it has stayed the same over the reads of
+     * this server, or undefined if the value has none. The first read of a value gives 0
+     */
+    private unchangedFor(service: string, object: string | undefined, name: string, value: unknown): { seqno: string; since: number; seconds: number } | undefined
+    {
+        const seqno = seqnoOf(value);
+        if (seqno === undefined) return undefined;
+        const key = `${this.registry.fullServiceName(service)}/${object ?? ""}/${name}`;
+        const now = Date.now();
+        let seen = this.seqnos.get(key);
+        if (seen?.seqno !== seqno) this.seqnos.set(key, seen = { seqno, since: now });
+        return { seqno, since: seen.since, seconds: (now - seen.since) / 1000 };
+    }
+
+    /** The message for a wire whose sequence number has stopped changing */
+    private notUpdating(name: string, u: { seqno: string; since: number; seconds: number }): string
+    {
+        return `${name} has not updated for at least ${Math.round(u.seconds)} seconds: its seqno has stayed at ${u.seqno} in every read since ${new Date(u.since).toISOString()}, and may have stopped changing before then. The device may have stopped sending new values, such as a driver that is no longer running, so this value is out of date.`;
+    }
+
     async readWire(service: string, object: string | undefined, name: string): Promise<Record<string, unknown>>
     {
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire"]);
         const { value, timestamp } = await stub.peekWireInValue(name);
-        return { value: encode(stub, value, m.type), timestamp: this.timestamp(timestamp) };
+        const out: Record<string, unknown> = { value: encode(stub, value, m.type), read_at: this.timestamp(timestamp) };
+        const unchanged = this.unchangedFor(service, object, name, value);
+        if (unchanged && unchanged.seconds >= NOT_UPDATING_S) out.not_updating = this.notUpdating(name, unchanged);
+        return out;
     }
 
     /** Whether a member is a wire, property, or event, for wait_until. Events are only collected on the root object */
@@ -289,14 +394,17 @@ export class BridgeTools
         return m.kind as "wire" | "property" | "event";
     }
 
-    /** The oldest event of this name received from a service whose arguments pass the test, left in place */
     /** Call a function whenever any service sends an event, until the returned function is called */
     onEvent(listener: () => void): () => void
     {
         return this.registry.onEvent(listener);
     }
 
-    findEvent(service: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
+    /**
+     * The oldest event of this name received from a service that passes the test, left in place. The
+     * test is given the event's arguments and its time in milliseconds
+     */
+    findEvent(service: string, event: string, test: (args: Record<string, unknown>, time: number) => boolean, since?: number): ReceivedEvent | undefined
     {
         return this.registry.findEvent(service, event, test, since);
     }
@@ -319,6 +427,9 @@ export class BridgeTools
         const stub = await this.registry.resolve(service, object);
         const m = member(stub, name, ["wire", "property"]);
         const value = m.kind === "wire" ? (await stub.peekWireInValue(name)).value : await stub.getProperty(name);
+        // A watched wire that has stopped updating cannot meet or keep a condition, so it is an error
+        const unchanged = m.kind === "wire" ? this.unchangedFor(service, object, name, value) : undefined;
+        if (unchanged && unchanged.seconds >= NOT_UPDATING_S) throw new Error(this.notUpdating(name, unchanged));
         return encode(stub, value, m.type);
     }
 
@@ -341,7 +452,8 @@ export class BridgeTools
         // now is from the same clock as the events' times, so the model can tell how long they have waited
         const out: Record<string, unknown> = { events, remaining, now: new Date().toISOString() };
         if (dropped > 0) out.dropped = dropped;
-        if (remaining > 0) out.note = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting. Call again to get ${remaining === 1 ? "it" : "them"}.`;
+        const more = `${remaining} more ${remaining === 1 ? "event is" : "events are"} waiting`;
+        if (remaining > 0) out.note = clear ? `${more}. Call again to get ${remaining === 1 ? "it" : "them"}.` : `${more} after these. Since clear is false, calling again returns these first, so call with clear true to reach ${remaining === 1 ? "it" : "them"}.`;
         return out;
     }
 
@@ -349,7 +461,8 @@ export class BridgeTools
     async robotMoveJoints(service: string, object: string | undefined, target: number[], duration_s: number, signal?: AbortSignal): Promise<Record<string, unknown>>
     {
         // Starting a motion selects the command mode, which would stop one already running
-        const key = `${service}/${object ?? ""}`;
+        // By the service's full name, so that two names for one robot cannot both move it
+        const key = `${this.registry.fullServiceName(service)}/${object ?? ""}`;
         if (this.moving.has(key)) throw new Error(`${service} is already moving. Wait for that motion to finish before starting another.`);
         this.moving.add(key);
         try
@@ -367,12 +480,30 @@ export class BridgeTools
         const stub = await this.registry.resolve(service, object);
         robotMember(stub);
 
-        const state = async () => (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array };
+        // Its reads are noted as read_wire's are, so a robot that stops updating after a motion is seen sooner
+        const state = async () =>
+        {
+            const value = (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array; seqno: bigint };
+            this.unchangedFor(service, object, "robot_state", value);
+            return value;
+        };
+        // A robot whose state has stopped updating would never be seen to arrive, so it is not moved
+        const first = await state();
+        if (seqnoOf(first) !== undefined)
+        {
+            const deadline = Date.now() + ROBOT_STATE_CHECK_S * 1000;
+            while (seqnoOf(await state()) === seqnoOf(first))
+            {
+                if (Date.now() > deadline) throw new Error(`robot_state has not updated for ${ROBOT_STATE_CHECK_S} second: its seqno stayed at ${seqnoOf(first)}. The robot's driver may have stopped, so the robot was not moved.`);
+                await sleep(50);
+            }
+        }
         const start = Array.from((await state()).joint_position);
-        if (target.length !== start.length) throw new Error(`The robot has ${start.length} joints but ${target.length} positions were given`);
+        if (target.length !== start.length) throw new Error(`The robot has ${start.length} joints but ${target.length} positions were given.`);
 
-        const info = await stub.getProperty("robot_info") as { joint_info: { joint_identifier: { name: string } }[] };
-        const joint_names = info.joint_info.map((j) => j.joint_identifier.name);
+        const info = await stub.getProperty("robot_info") as RobotInfo;
+        checkJointTarget(info, target);
+        const joint_names = info.joint_info.map((j) => j.joint_identifier?.name ?? "");
 
         const steps = Math.max(4, Math.ceil(duration_s / WAYPOINT_SPACING_S));
         const waypoints = Array.from({ length: steps + 1 }, (_, i) =>
@@ -391,21 +522,28 @@ export class BridgeTools
 
         await stub.setProperty("command_mode", COMMAND_MODE_HALT);
         await sleep(100);
-        await stub.setProperty("command_mode", COMMAND_MODE_TRAJECTORY);
-
-        if (signal?.aborted) throw signal.reason;
-        const generator = await stub.callFunction("execute_trajectory", [{ joint_names, joint_units: null, waypoints, extended: null }]) as GeneratorHandle;
+        // Once in trajectory mode, the robot is halted whenever the motion does not complete: when it is
+        // stopped, fails, or runs out of time. After a motion that completes, it is left in trajectory mode
+        const halt = () => stub.setProperty("command_mode", COMMAND_MODE_HALT).catch(() => undefined);
+        const limit_s = duration_s + 30;
         let run: Record<string, unknown>;
         try
         {
-            run = await this.runGenerator(stub, generator, undefined, duration_s + 30, signal);
+            await stub.setProperty("command_mode", COMMAND_MODE_TRAJECTORY);
+            if (signal?.aborted) throw signal.reason;
+            const generator = await stub.callFunction("execute_trajectory", [{ joint_names, joint_units: null, waypoints, extended: null }]) as GeneratorHandle;
+            run = await this.runGenerator(stub, generator, undefined, limit_s, signal);
         }
         catch (e)
         {
-            // Stopped partway, such as by cancelling a sequence. The robot must not be left in trajectory mode
-            if (signal?.aborted) await stub.setProperty("command_mode", COMMAND_MODE_HALT).catch(() => undefined);
+            await halt();
             throw e;
         }
-        return { ...run, results: undefined, start, target, final_position: Array.from((await state()).joint_position) };
+        if (run.completed !== true)
+        {
+            await halt();
+            throw new Error(`The robot did not finish the motion within ${limit_s} ${limit_s === 1 ? "second" : "seconds"}, so it was aborted and the robot halted.`);
+        }
+        return { ...run, results: undefined, count: undefined, start, target, final_position: Array.from((await state()).joint_position) };
     }
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { readFileSync } from "node:fs";
+import * as z from "zod/v4";
 import { RobotRaconteurError, RobotRaconteurNode, subscribeService } from "robotraconteur";
 import type { ServiceStub, ServiceSubscription } from "robotraconteur";
 import { IPNodeDiscoveryFlags, NodeDiscovery, TcpTransport } from "robotraconteur-node";
@@ -33,9 +34,21 @@ export interface BridgeConfig
     requestTimeout?: number;
 }
 
+const configSchema = z.strictObject({
+    services: z.array(z.strictObject({ name: z.string().min(1), url: z.string().min(1), username: z.string().optional(), passwordEnv: z.string().optional() })).optional(),
+    serviceTypes: z.array(z.string()).optional(),
+    nodeNames: z.array(z.string()).optional(),
+    ipv4Discovery: z.boolean().optional(),
+    requestTimeout: z.number().positive().optional()
+});
+
+/** Read the configuration file, checking it so that a misspelled or misplaced setting is reported */
 export function loadConfig(path: string | undefined): BridgeConfig
 {
-    return path ? (JSON.parse(readFileSync(path, "utf8")) as BridgeConfig) : {};
+    if (!path) return {};
+    const parsed = configSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+    if (!parsed.success) throw new Error(`The configuration file ${path} is not valid: ${z.prettifyError(parsed.error)}`);
+    return parsed.data;
 }
 
 export interface ReceivedEvent
@@ -128,6 +141,12 @@ export class ServiceRegistry
             out.set(name, i);
         }
         return out;
+    }
+
+    /** The full name of a service, for a name given by the model, which may be just the service name */
+    fullServiceName(name: string): string
+    {
+        return this.fullName(name);
     }
 
     /** Find the full name for a name given by the model, which may be just the service name */
@@ -289,9 +308,9 @@ export class ServiceRegistry
      * place. Events received before the call count, so one that arrived just before is not missed,
      * unless since, a time in milliseconds, leaves out those received before it
      */
-    findEvent(name: string, event: string, test: (args: Record<string, unknown>) => boolean, since?: number): ReceivedEvent | undefined
+    findEvent(name: string, event: string, test: (args: Record<string, unknown>, time: number) => boolean, since?: number): ReceivedEvent | undefined
     {
-        return this.connect(name).events.find((e) => e.event === event && (since === undefined || Date.parse(e.time) >= since) && test(e.arguments));
+        return this.connect(name).events.find((e) => e.event === event && (since === undefined || Date.parse(e.time) >= since) && test(e.arguments, Date.parse(e.time)));
     }
 
     /** Call a function whenever any service sends an event, until the returned function is called */
@@ -332,7 +351,8 @@ export class ServiceRegistry
             service.events = service.events.filter((e) => !taken.has(e));
             service.droppedEvents = 0;
         }
-        return { events, remaining: matching.length - (clear ? events.length : 0), dropped };
+        // The events after those returned, whether or not these were removed
+        return { events, remaining: matching.length - events.length, dropped };
     }
 
     /** Describe known services as JSON */

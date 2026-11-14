@@ -16,6 +16,7 @@ import type { MemberDefinition, ServiceDefinition, ServiceStub, TypeDefinition }
 import { primitivesByName } from "robotraconteur/internal";
 import type { TypeContext } from "robotraconteur/internal";
 import { typeName } from "./codec.js";
+import { standardDocsNote } from "./standard_help.js";
 
 const MAX_TYPES = 100;
 
@@ -92,12 +93,14 @@ export function describeObject(stub: ServiceStub, member?: string): Record<strin
 
     if (member === undefined)
     {
+        const note = standardDocsNote(stub.objectType);
         return {
             objectType: stub.objectType,
             ...(scope.docString ? { serviceDoc: doc(scope.docString) } : {}),
             ...(entry.docString ? { doc: doc(entry.docString) } : {}),
             members: entry.members.map(memberSummary),
-            hint: "Call robotraconteur_describe again with member set to see the fields and enum values of the types a member uses."
+            hint: "Call robotraconteur_describe again with member set to see the fields and enum values of the types a member uses.",
+            ...(note ? { standard_docs: note } : {})
         };
     }
 
@@ -107,10 +110,12 @@ export function describeObject(stub: ServiceStub, member?: string): Record<strin
     const types = new Map<string, unknown>();
     if (m.type) collectTypes(m.type, scope, context.types, types);
     for (const p of m.parameters ?? []) collectTypes(p.type, scope, context.types, types);
+    const note = standardDocsNote(stub.objectType, types.keys());
     return {
         objectType: stub.objectType,
         member: memberSummary(m),
         types: Object.fromEntries(types),
-        ...(types.size >= MAX_TYPES ? { truncated: true } : {})
+        ...(types.size >= MAX_TYPES ? { truncated: true } : {}),
+        ...(note ? { standard_docs: note } : {})
     };
 }

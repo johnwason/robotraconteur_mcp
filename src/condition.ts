@@ -13,12 +13,37 @@
 // limitations under the License.
 
 // Conditions on values, written as MongoDB queries, which models already know. mingo evaluates them
-// without parsing an expression language. Scripts are turned off, so a condition from the model can
-// never run code, and regular expressions are refused, so one cannot take unbounded time.
+// without parsing an expression language. Only the operators listed here are allowed, so a condition
+// from the model can never run code, and takes time in proportion to its size and the value's: no
+// scripts, no regular expressions, and no operators that loop or build arrays, such as $range, which
+// could build a billion elements on every check.
 
 import { Query } from "mingo";
 
-const REFUSED = new Set(["$where", "$function", "$accumulator", "$regex", "$regexMatch", "$regexFind", "$regexFindAll"]);
+const ALLOWED = new Set([
+    // Query operators
+    "$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$and", "$or", "$nor", "$not", "$exists", "$type",
+    "$size", "$all", "$elemMatch", "$mod", "$expr",
+    // Arithmetic
+    "$abs", "$add", "$ceil", "$divide", "$exp", "$floor", "$ln", "$log", "$log10", "$multiply", "$pow", "$round",
+    "$sqrt", "$subtract", "$trunc",
+    // Comparison
+    "$cmp",
+    // Conditional
+    "$cond", "$ifNull", "$switch",
+    // Type
+    "$convert", "$isNumber", "$toBool", "$toDate", "$toDecimal", "$toDouble", "$toInt", "$toLong", "$toString",
+    // String
+    "$concat", "$indexOfBytes", "$ltrim", "$rtrim", "$trim", "$split", "$strcasecmp", "$strLenBytes", "$strLenCP",
+    "$substr", "$substrBytes", "$substrCP", "$toLower", "$toUpper",
+    // Arrays, without looping over them
+    "$arrayElemAt", "$first", "$last", "$indexOfArray", "$isArray", "$slice", "$concatArrays", "$reverseArray",
+    "$sum", "$avg", "$min", "$max",
+    // Other
+    "$literal", "$let", "$getField"
+]);
+
+const REFUSED_HELP = "Conditions can use the query operators, and in $expr arithmetic, comparison, logical, conditional, type, string, and simple array operators, but not operators that run code, use regular expressions, or loop over or build arrays, such as $map, $filter, $reduce, and $range.";
 
 function findRefused(x: unknown): string | undefined
 {
@@ -34,7 +59,7 @@ function findRefused(x: unknown): string | undefined
     if (typeof x !== "object" || x === null) return undefined;
     for (const [k, v] of Object.entries(x))
     {
-        if (REFUSED.has(k)) return k;
+        if (k.startsWith("$") && !ALLOWED.has(k)) return k;
         const found = findRefused(v);
         if (found) return found;
     }
@@ -59,7 +84,7 @@ export function compileCondition(condition: unknown): (value: unknown) => boolea
         throw new Error("condition must be an object: a MongoDB query, such as { \"joint_position.0\": { \"$gte\": 0.29 } }.");
     }
     const refused = findRefused(condition);
-    if (refused) throw new Error(`${refused} is not allowed in a condition.`);
+    if (refused) throw new Error(`${refused} is not allowed in a condition. ${REFUSED_HELP}${refused.startsWith("$regex") ? ` To match text in any case, use $expr with $toLower, such as { "$expr": { "$eq": [{ "$toLower": "$message" }, "stop"] } }, or to find it within the text, $indexOfBytes, such as { "$expr": { "$gte": [{ "$indexOfBytes": [{ "$toLower": "$message" }, "stop"] }, 0] } }.` : ""}`);
     let query: Query;
     try
     {

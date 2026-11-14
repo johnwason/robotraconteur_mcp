@@ -19,6 +19,7 @@ import { performance } from "node:perf_hooks";
 import { compileCondition } from "./condition.js";
 import { errorText } from "./errors.js";
 import type { ReceivedEvent } from "./registry.js";
+import { untilAborted } from "./tools.js";
 import type { BridgeTools } from "./tools.js";
 
 export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when", "noop"] as const;
@@ -79,7 +80,7 @@ interface PreparedWatch
     combine?: (value: unknown) => boolean;
     since?: number;
     /** Events left for a stop_when of the same sequence, which a wait_until does not take */
-    reserved?: (service: string, event: string, args: Record<string, unknown>) => boolean;
+    reserved?: (service: string, event: string, args: Record<string, unknown>, time: number) => boolean;
 }
 
 /** What one check found for one watched thing */
@@ -181,12 +182,10 @@ const MAX_STATUS_RESULTS = 200;
 const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "robot_move_joints"];
 /** The most things one wait_until step can watch */
 const MAX_WATCH = 10;
-/** The most of each value shown when a wait_until with watch times out */
-const WATCH_VALUE_CHARS = 300;
+/** The most of each value shown when a wait_until times out */
+const VALUE_CHARS = 300;
 /** How often wait_until reads its value unless the step says otherwise */
 const DEFAULT_CHECK_EVERY_S = 0.05;
-/** The most of the last value shown when a wait_until times out */
-const LAST_VALUE_CHARS = 1000;
 /** A step that starts later than its time by more than this reports how late it was. Less is timer jitter */
 const LATE_REPORTED_S = 0.02;
 
@@ -282,33 +281,26 @@ function sleepOrEvent(ms: number, signal: AbortSignal, tools: BridgeTools): Prom
 }
 
 /** Settle with the action, or with the abort reason as soon as the signal aborts */
-function untilAborted<T>(action: Promise<T>, signal: AbortSignal): Promise<T>
-{
-    return new Promise((resolve, reject) =>
-    {
-        const stop = () => reject(signal.reason);
-        if (signal.aborted) stop();
-        signal.addEventListener("abort", stop, { once: true });
-        action.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
-    });
-}
-
 /** The field names a combine query refers to: the first part of each field path, wherever it appears */
-function combineFields(x: unknown, out = new Set<string>()): Set<string>
+function combineFields(x: unknown, out = new Set<string>(), within: "query" | "expr" = "query"): Set<string>
 {
+    // A field is a key of the query itself, such as "answer.ok", or a "$path" string inside $expr. The
+    // names of an operator's arguments, such as $trim's input, and the contents of a value being
+    // matched, such as the fields of $elemMatch, are not fields of the query
     if (Array.isArray(x))
     {
-        for (const v of x) combineFields(v, out);
+        for (const v of x) combineFields(v, out, within);
     }
     else if (typeof x === "object" && x !== null)
     {
         for (const [k, v] of Object.entries(x))
         {
-            if (!k.startsWith("$")) out.add(k.split(".")[0]!);
-            combineFields(v, out);
+            if (within === "expr" || k === "$expr") combineFields(v, out, "expr");
+            else if (k.startsWith("$")) combineFields(v, out, "query");
+            else out.add(k.split(".")[0]!);
         }
     }
-    else if (typeof x === "string" && x.startsWith("$") && !x.startsWith("$$"))
+    else if (within === "expr" && typeof x === "string" && x.startsWith("$") && !x.startsWith("$$"))
     {
         // A field path in $expr, such as "$msg"
         out.add(x.slice(1).split(".")[0]!);
@@ -316,13 +308,39 @@ function combineFields(x: unknown, out = new Set<string>()): Set<string>
     return out;
 }
 
+/** The robotraconteur_help topic that explains a refused sequence, matched on the error, first match wins */
+const HELP_FOR_ERROR: [RegExp, string][] = [
+    // These list every action or field, so they are matched before the names in them
+    [/Unknown action|does not use/, "actions"],
+    [/is not allowed in a condition|not a valid MongoDB query/, "conditions"],
+    [/only_if/, "skipping"],
+    [/on_stop/, "on_stop"],
+    [/\bat_s\b|max_late|\bafter (must|cannot)|cannot tell which one is meant|\bat, |\bat is an absolute|ISO 8601 time/, "timing"],
+    [/outside its limits/, "actions"],
+    [/\bwatch\b|combine|timeout_s/, "waiting"],
+    [/stop_when|\btarget\b/, "stopping"],
+    [/action needs|joint_position|repeat|limit must/, "actions"]
+];
+
+function withHelpTopic(message: string): string
+{
+    const topic = HELP_FOR_ERROR.find(([re]) => re.test(message))?.[1];
+    return topic ? `${message} See robotraconteur_help topic ${topic}.` : message;
+}
+
+/** A number of seconds, as text: "1 second", "2.5 seconds" */
+function secondsText(n: number): string
+{
+    return `${n} ${n === 1 ? "second" : "seconds"}`;
+}
+
+/** The key an on_stop step's only_if uses for how the sequence ended */
+const SEQUENCE_KEY = "_sequence";
+
 /**
  * Check an only_if query: valid, and using only the labels of steps that come before, which must be
  * unique so that it is clear which step each means
  */
-/** The key an on_stop step's only_if uses for how the sequence ended */
-const SEQUENCE_KEY = "_sequence";
-
 function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceStep[], on_stop = false): void
 {
     try
@@ -340,7 +358,7 @@ function checkOnlyIf(only_if: unknown, earlier: SequenceStep[], all: SequenceSte
             if (on_stop) continue;
             throw new Error(`only_if uses ${SEQUENCE_KEY}, which only on_stop steps can use, since it says how the sequence ended.`);
         }
-        if (!earlier.some((s) => s.label === label)) throw new Error(`only_if uses "${label}", which is not the label of an earlier step. It queries earlier labelled steps by label, such as { "${label}.ok": true }.`);
+        if (!earlier.some((s) => s.label === label)) throw new Error(`only_if uses "${label}", which is not the label of an earlier step${on_stop ? ", or of an earlier on_stop step" : ""}. It queries earlier labelled steps by label, such as { "${label}.ok": true }.`);
         if (all.filter((s) => s.label === label).length > 1) throw new Error(`only_if uses "${label}", which labels more than one step. Give the steps different labels.`);
     }
 }
@@ -450,7 +468,6 @@ class Sequence
     /** The stop_when step that stopped the sequence, and what it saw */
     stopped_by?: Record<string, unknown>;
     stop_message?: string;
-    /** The stop_when steps started, by step index, and whether each is still watching */
     /** The stop_when steps started, by step index, and whether each is still watching. A call's stop_when has index -1 */
     readonly monitors = new Map<number, { label?: string; active: boolean; watch: PreparedWatch }>();
     /** Called with each step result as it is recorded, for until */
@@ -497,17 +514,25 @@ export class SequenceRunner
     constructor(private tools: BridgeTools) {}
 
     /**
-     * Check every step, then start the sequence. Nothing is done if a step is wrong. service is used
-     * by the steps that do not name one. With wait_s, waits up to that long for the sequence to finish
-     * and reports it as status does
-     */
-    /**
      * Check every step of every sequence, then start them all at the same instant, on one clock, so
      * that their at_s values line up. Nothing starts if any step is wrong. Each sequence's service is
      * used by its steps that do not name one. With wait_s, waits up to that long for them all to
      * finish, and reports each as status does
      */
     async start(specs: SequenceSpec[], wait_s = 0, detail: ResultDetail = "compact", call_stop?: CallStopWhen, until?: string, stop_together = false): Promise<Record<string, unknown>>
+    {
+        try
+        {
+            return await this.startChecked(specs, wait_s, detail, call_stop, until, stop_together);
+        }
+        catch (e)
+        {
+            // A model that skipped robotraconteur_help is pointed to the topic it needs when it needs it
+            throw new Error(withHelpTopic(errorText(e)));
+        }
+    }
+
+    private async startChecked(specs: SequenceSpec[], wait_s: number, detail: ResultDetail, call_stop: CallStopWhen | undefined, until: string | undefined, stop_together: boolean): Promise<Record<string, unknown>>
     {
         if (until !== undefined)
         {
@@ -552,6 +577,10 @@ export class SequenceRunner
             }
         }
 
+        // Counted again, since other calls may have started sequences while these were checked. Nothing
+        // waits from here to the launch, so no other call can start any in between
+        const now_running = [...this.sequences.values()].filter((s) => s.state === "running").length;
+        if (now_running + specs.length > SEQUENCE_LIMITS.maxRunning) throw new Error(`${now_running} sequences are already running, and at most ${SEQUENCE_LIMITS.maxRunning} can run at once. Wait for one to finish, or cancel one with robotraconteur_cancel_sequence.`);
         const clock = { started: new Date(), t0: performance.now() };
         const sequences = prepared.map((p) => this.launch(p, clock));
         if (stop_together && sequences.length > 1) for (const s of sequences) s.together = sequences;
@@ -582,7 +611,7 @@ export class SequenceRunner
         const with_service = (s: SequenceStep) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s;
         const steps = given_steps.map(with_service);
         const on_stop = given_on_stop.map(with_service);
-        if (on_stop.length > MAX_ON_STOP) throw new Error(`on_stop can have at most ${MAX_ON_STOP} steps`);
+        if (on_stop.length > MAX_ON_STOP) throw new Error(`on_stop can have at most ${MAX_ON_STOP} steps. The sequence was not started.`);
         for (const [i, step] of on_stop.entries())
         {
             const where = `on_stop[${i}] (${[step.action, step.label ?? step.name].filter((x) => x).join(" ")})`;
@@ -591,7 +620,9 @@ export class SequenceRunner
             if (timing.length > 0) throw new Error(`${where}: on_stop steps run at once and in order, each even if another fails, so they cannot use ${timing.join(", ")}. The sequence was not started.`);
             try
             {
-                if (step.only_if !== undefined) checkOnlyIf(step.only_if, steps, steps, true);
+                if (step.label === SEQUENCE_KEY) throw new Error(`The label ${SEQUENCE_KEY} is kept for on_stop's only_if. Use another label.`);
+                // An on_stop step's only_if can query the main steps, and the on_stop steps before it
+                if (step.only_if !== undefined) checkOnlyIf(step.only_if, [...steps, ...on_stop.slice(0, i)], [...steps, ...on_stop], true);
                 await this.check(step, SEQUENCE_LIMITS.maxDuration);
             }
             catch (e)
@@ -599,9 +630,9 @@ export class SequenceRunner
                 throw new Error(`${where}: ${errorText(e)} The sequence was not started.`);
             }
         }
-        if (steps.length === 0) throw new Error("A sequence needs at least one step");
-        if (steps.length > SEQUENCE_LIMITS.maxSteps) throw new Error(`A sequence can have at most ${SEQUENCE_LIMITS.maxSteps} steps`);
-        if (!(max_duration_s > 0) || max_duration_s > SEQUENCE_LIMITS.maxDuration) throw new Error(`max_duration_s must be more than 0 and at most ${SEQUENCE_LIMITS.maxDuration}`);
+        if (steps.length === 0) throw new Error("A sequence needs at least one step. The sequence was not started.");
+        if (steps.length > SEQUENCE_LIMITS.maxSteps) throw new Error(`A sequence can have at most ${SEQUENCE_LIMITS.maxSteps} steps. The sequence was not started.`);
+        if (!(max_duration_s > 0) || max_duration_s > SEQUENCE_LIMITS.maxDuration) throw new Error(`max_duration_s must be more than 0 and at most ${SEQUENCE_LIMITS.maxDuration}. The sequence was not started.`);
 
         let runs = 0;
         for (const [i, step] of steps.entries())
@@ -630,7 +661,7 @@ export class SequenceRunner
                 throw new Error(`${describeStep(step, i)}: ${errorText(e)} The sequence was not started.`);
             }
         }
-        if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed`);
+        if (runs > SEQUENCE_LIMITS.maxRuns) throw new Error(`The steps run ${runs} times, counting repeats, but at most ${SEQUENCE_LIMITS.maxRuns} are allowed. The sequence was not started.`);
         checkDeadlines(steps);
 
         // stop_when watches are prepared now, so that they start at once and do not delay the steps after them
@@ -650,7 +681,7 @@ export class SequenceRunner
         sequence.prepared_watches = p.watches;
         this.sequences.set(sequence.id, sequence);
         this.forgetOld();
-        const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${p.max_duration_s} seconds`)), p.max_duration_s * 1000);
+        const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${secondsText(p.max_duration_s)}.`)), p.max_duration_s * 1000);
         sequence.done = this.run(sequence).finally(() => clearTimeout(timeout));
         return sequence;
     }
@@ -733,7 +764,7 @@ export class SequenceRunner
         if (!SEQUENCE_ACTIONS.includes(step.action)) throw new Error(`Unknown action "${String(step.action)}". Use one of: ${SEQUENCE_ACTIONS.join(", ")}.`);
         const unused = Object.keys(step).filter((k) => step[k as keyof SequenceStep] !== undefined && !COMMON_FIELDS.includes(k as keyof SequenceStep) && !ACTION_FIELDS[step.action].includes(k as keyof SequenceStep));
         if (unused.length > 0) throw new Error(`The ${step.action} action does not use ${unused.join(", ")}. It uses: ${ACTION_FIELDS[step.action].join(", ")}.`);
-        if (step.at_s !== undefined && !(step.at_s >= 0 && step.at_s < max_duration_s)) throw new Error("at_s must be at least 0 and less than max_duration_s.");
+        if (step.at_s !== undefined && !(step.at_s >= 0 && step.at_s < max_duration_s)) throw new Error(`at_s ${step.at_s} must be at least 0 and less than max_duration_s, ${max_duration_s}.`);
         if (step.at !== undefined)
         {
             if (step.at_s !== undefined || step.after !== undefined) throw new Error("at is an absolute time, so it cannot be used with at_s or after.");
@@ -751,7 +782,8 @@ export class SequenceRunner
         {
             if (step.at !== undefined) throw new Error("max_late_s counts like at_s, so it cannot be used with at. Use max_late, an absolute time, with at.");
             if (step.max_late !== undefined) throw new Error("Give max_late or max_late_s, not both.");
-            if (!(step.max_late_s >= (step.at_s ?? 0) && step.max_late_s < max_duration_s)) throw new Error("max_late_s cannot be before the step's at_s, and must be less than max_duration_s.");
+            if (!(step.max_late_s >= (step.at_s ?? 0))) throw new Error(`max_late_s ${step.max_late_s} is before the step's at_s ${step.at_s ?? 0}. It must be at least at_s.`);
+            if (!(step.max_late_s < max_duration_s)) throw new Error(`max_late_s ${step.max_late_s} must be less than max_duration_s, ${max_duration_s}.`);
         }
         if (step.repeat)
         {
@@ -805,7 +837,7 @@ export class SequenceRunner
             need("joint_position");
             if (!(typeof step.duration_s === "number" && step.duration_s > 0 && step.duration_s <= 100)) throw new Error("The robot_move_joints action needs duration_s, more than 0 and at most 100.");
             if (!Array.isArray(step.joint_position) || !step.joint_position.every((x) => Number.isFinite(x))) throw new Error("joint_position must be an array of numbers.");
-            await this.tools.check(service, step.object, "robot", "");
+            await this.tools.check(service, step.object, "robot", "", step.joint_position);
             break;
         }
     }
@@ -816,8 +848,8 @@ export class SequenceRunner
         if (step.watch === undefined)
         {
             if (step.combine !== undefined) throw new Error("combine needs watch.");
-            if (step.name === undefined || step.condition === undefined) throw new Error("The wait_until action needs name and condition, or watch.");
-            if (step.service === undefined) throw new Error("The wait_until action needs service.");
+            if (step.name === undefined || step.condition === undefined) throw new Error(`The ${step.action} action needs name and condition, or watch.`);
+            if (step.service === undefined) throw new Error(`The ${step.action} action needs service.`);
             return [{ key: step.name, service: step.service, object: step.object, name: step.name, condition: step.condition }];
         }
         if (step.name !== undefined || step.condition !== undefined || step.object !== undefined) throw new Error("Give either watch, or name and condition, not both. With watch, name, condition, and object go in each entry.");
@@ -949,7 +981,7 @@ export class SequenceRunner
             if (p.kinds[i] === "event")
             {
                 const reserved = p.reserved;
-                const test = reserved ? (args: Record<string, unknown>) => w.test(args) && !reserved(w.service, w.name, args) : w.test;
+                const test = reserved ? (args: Record<string, unknown>, time: number) => w.test(args) && !reserved(w.service, w.name, args, time) : w.test;
                 const event = this.tools.findEvent(w.service, w.name, test, p.since);
                 return { matched: event !== undefined, event };
             }
@@ -989,9 +1021,11 @@ export class SequenceRunner
     private async waitUntil(step: SequenceStep, signal: AbortSignal, sequence?: Sequence): Promise<unknown>
     {
         const p = await this.prepareWatch(step);
-        // An event that a stop_when of the same sequence matches is left for it, so the stop wins
-        if (sequence) p.reserved = (service, event, args) => [...sequence.monitors.values()].some((m) =>
-            m.active && !m.watch.step.combine && m.watch.watches.some((w, i) => m.watch.kinds[i] === "event" && w.service === service && w.name === event && w.test(args)));
+        // An event that a stop_when of the same sequence matches is left for it, so the stop wins. One the
+        // stop_when ignores, received before it started with new_events_only, is not held back
+        if (sequence) p.reserved = (service, event, args, time) => [...sequence.monitors.values()].some((m) =>
+            m.active && !m.watch.step.combine && (m.watch.since === undefined || time >= m.watch.since)
+            && m.watch.watches.some((w, i) => m.watch.kinds[i] === "event" && w.service === service && w.name === event && w.test(args)));
         const started = performance.now();
         const deadline = started + step.timeout_s! * 1000;
         const every = (step.check_every_s ?? DEFAULT_CHECK_EVERY_S) * 1000;
@@ -1129,16 +1163,16 @@ export class SequenceRunner
         };
         if (!step.watch)
         {
-            if (kinds[0] === "event") return `No ${step.name} event matching the condition arrived within ${step.timeout_s} seconds.${passed(ignored[0]!)}`;
-            return `The condition was not met within ${step.timeout_s} seconds. The last value of ${step.name} was ${shown(outcomes[0]!.value, LAST_VALUE_CHARS)}`;
+            if (kinds[0] === "event") return `No ${step.name} event matching the condition arrived within ${secondsText(step.timeout_s!)}.${passed(ignored[0]!)}`;
+            return `The condition was not met within ${secondsText(step.timeout_s!)}. The last value of ${step.name} was ${shown(outcomes[0]!.value, VALUE_CHARS)}.`;
         }
         const each = watches.map((w, i) =>
         {
             const o = outcomes[i]!;
             if (kinds[i] === "event") return `${w.key}: ${o.matched ? "a matching event is waiting" : `no matching ${w.name} event`}${ignored[i] ? ` (${ignored[i]} earlier ignored because of new_events_only)` : ""}`;
-            return `${w.key}: ${o.matched ? "met" : "not met"}, last value ${shown(o.value, WATCH_VALUE_CHARS)}`;
+            return `${w.key}: ${o.matched ? "met" : "not met"}, last value ${shown(o.value, VALUE_CHARS)}`;
         });
-        return `The ${step.combine ? "combined condition" : "conditions"} ${step.combine ? "was" : "were"} not met within ${step.timeout_s} seconds. ${each.join("; ")}`;
+        return `The ${step.combine ? "combined condition" : "conditions"} ${step.combine ? "was" : "were"} not met within ${secondsText(step.timeout_s!)}. ${each.join("; ")}.`;
     }
 
     private async run(sequence: Sequence): Promise<void>
@@ -1183,12 +1217,16 @@ export class SequenceRunner
                     if (latest !== undefined)
                     {
                         const deadline = latest + k * (step.repeat?.every_s ?? 0) * 1000;
+                        // In sequence time, from the wall clock read once when the sequence started, so
+                        // that a change to the system clock partway does not move deadlines
+                        const deadline_s = (deadline - sequence.started.getTime()) / 1000;
+                        const now_s = sequence.elapsed;
                         // Getting from one step to the next takes a millisecond or two, which is not lateness
-                        if (Date.now() > deadline + LATE_REPORTED_S * 1000)
+                        if (now_s > deadline_s + LATE_REPORTED_S)
                         {
-                            const came = new Date();
-                            const entry: StepResult = { step: i, iteration, action: step.action, label: step.label, started_s: round(sequence.elapsed), duration_s: 0 };
-                            entry.late_s = round((came.getTime() - deadline) / 1000);
+                            const came = new Date(sequence.started.getTime() + now_s * 1000);
+                            const entry: StepResult = { step: i, iteration, action: step.action, label: step.label, started_s: round(now_s), duration_s: 0 };
+                            entry.late_s = round(now_s - deadline_s);
                             entry.error = `It came up at ${came.toISOString()}, ${entry.late_s} s after its latest start time, ${new Date(deadline).toISOString()}, so it did not run.`;
                             record(sequence, step, entry);
                             if (!step.continue_on_error) throw new Error(`${describeStep(step, i)} failed: ${entry.error}`);
@@ -1281,7 +1319,7 @@ export class SequenceRunner
     private async runOnStop(sequence: Sequence): Promise<void>
     {
         const controller = new AbortController();
-        const limit = setTimeout(() => controller.abort(new Error(`on_stop ran longer than ${ON_STOP_LIMIT_S} seconds, so its remaining steps were not run`)), ON_STOP_LIMIT_S * 1000);
+        const limit = setTimeout(() => controller.abort(new Error(`on_stop ran longer than ${secondsText(ON_STOP_LIMIT_S)}, so its remaining steps were not run.`)), ON_STOP_LIMIT_S * 1000);
         sequence.on_stop_results = [];
         try
         {
@@ -1289,10 +1327,16 @@ export class SequenceRunner
             {
                 const started = sequence.elapsed;
                 const entry: StepResult = { step: i, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
+                // An on_stop step's outcome can be queried by the only_if of the on_stop steps after it
+                const keep = () =>
+                {
+                    sequence.on_stop_results!.push(entry);
+                    if (step.label !== undefined) sequence.outcomes.set(step.label, { ok: entry.error === undefined && !entry.skipped, skipped: entry.skipped === true, result: entry.result, error: entry.error });
+                };
                 if (step.only_if !== undefined && !onlyIf(sequence, step.only_if, true))
                 {
                     entry.skipped = true;
-                    sequence.on_stop_results.push(entry);
+                    keep();
                     continue;
                 }
                 try
@@ -1306,7 +1350,7 @@ export class SequenceRunner
                     entry.error = errorText(e);
                 }
                 entry.duration_s = round(sequence.elapsed - started);
-                sequence.on_stop_results.push(entry);
+                keep();
             }
         }
         finally
@@ -1358,7 +1402,7 @@ export class SequenceRunner
         {
             const s = sequence.steps[at.step]!;
             const which = `step ${at.step}${at.iteration !== undefined ? ` run ${at.iteration}` : ""} (${s.label ?? s.action})`;
-            const where = at.waiting ? `Between steps: no step was running, though a motion that an earlier step started without waiting may still be. ${which} was waiting for its time and did not start` : `During ${which}, which was stopped`;
+            const where = at.waiting ? `Between steps: no step was running, though a motion that an earlier step started without waiting may still be. ${which} was waiting for its time and did not start.` : `During ${which}, which was stopped.`;
             report.stopped = sequence.state === "stopped" && sequence.stop_message && sequence.stopped_by?.error === undefined ? `${sequence.stop_message}. ${where}` : where;
         }
         if (sequence.stopped_by) report.stopped_by = sequence.stopped_by;
