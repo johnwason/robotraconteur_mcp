@@ -1285,7 +1285,8 @@ export class SequenceRunner
                     const entry: StepResult = { step: i, iteration: step.repeat ? k : undefined, action: step.action, label: step.label, started_s: round(started), duration_s: 0 };
                     // Steps with a deadline always report their lateness, so that their timing can be read directly
                     if (latest !== undefined) entry.late_s = round(Math.max(0, started - scheduled));
-                    else if (started - scheduled > LATE_REPORTED_S) entry.late_s = round(started - scheduled);
+                    // A generator_next run waits on the one before, as the help says, so that is not lateness
+                    else if (started - scheduled > LATE_REPORTED_S && step.action !== "generator_next") entry.late_s = round(started - scheduled);
                     const sink: { native?: NativeValue } = {};
                     try
                     {

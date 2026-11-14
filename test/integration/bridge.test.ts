@@ -706,6 +706,8 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.equal(seq.results.length, 17);
         assert.equal(seq.results.filter((x: any) => x.result.done === false).length, 16);
         assert.equal(seq.results[16].result.done, true);
+        // A run held up by the next before it is not late
+        assert.ok(seq.results.every((x: any) => x.late_s === undefined), JSON.stringify(seq.results));
         assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "latest" })).value, 15);
     });
 

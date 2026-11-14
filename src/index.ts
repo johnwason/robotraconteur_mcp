@@ -211,7 +211,7 @@ Essentials: steps of a sequence run one at a time, in order. Sequences in one ca
             until: z.string().optional().describe("With wait_s, return as soon as the step with this label has a result, rather than when the sequences end. until_met says whether it did"),
             stop_when: call_stop_when.optional().describe("A stop_when for the whole call: if its condition is met, every sequence still running is stopped at once and runs its own on_stop. It holds only the events it matches, so the stop wins and other events still reach the wait_until steps. Use it, not one stop_when in each sequence, to stop a whole show on one message or fault. robotraconteur_help topic: stopping"),
             detail: z.enum(["compact", "full"]).optional().describe("With wait_s, which results to give for each sequence, as robotraconteur_sequence_status does. The default is compact"),
-            wait_s: z.number().min(0).max(SEQUENCE_LIMITS.maxStatusWait).optional().describe("Wait up to this many seconds, counted from the start, for all the sequences to finish, and answer for each as robotraconteur_sequence_status does"),
+            wait_s: z.number().min(0).max(SEQUENCE_LIMITS.maxStatusWait).optional().describe("Hold this call up to this many seconds, counted from the start, for all the sequences to finish, and answer for each as robotraconteur_sequence_status does. Leave it out to keep working while they run"),
         })
     }, (a) => respond(() => sequences.start(a.sequences as SequenceSpec[], a.wait_s ?? 0, a.detail ?? "compact", a.stop_when as CallStopWhen | undefined, a.until, a.stop_together ?? false)));
 
