@@ -42,7 +42,7 @@ const HELP: Record<HelpTopic, string> = {
 - wait (seconds). noop does nothing, such as to anchor timing with at.
 - wait_until (name and condition, or watch; timeout_s), stop_when (name and condition, or watch), end_stop_when (target): see waiting and stopping.
 Arguments are fixed when the sequence starts: a step cannot use an earlier step's result, such as passing a value one step read as another step's argument. To act on a result, branch on it with only_if, or read it in the step's result and start a new sequence.
-Fields for any action: label, at_s, after, at, max_late, max_late_s, only_if, repeat { count, every_s } to run the step several times at a fixed interval, such as to sample a wire, and continue_on_error to go on if the step fails.
+Fields for any action: label, at_s, after, at, max_late, max_late_s, only_if, repeat { count, every_s } to run the step several times at a fixed interval, such as to sample a wire (every run must start before max_duration_s; the last starts (count - 1) × every_s after the first), and continue_on_error to go on if the step fails.
 Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns} runs counting repeats per sequence, ${SEQUENCE_LIMITS.maxRunning} sequences running at once, max_duration_s at most ${SEQUENCE_LIMITS.maxDuration} (default ${SEQUENCE_LIMITS.defaultDuration}).`,
 
     timing: `Steps of a sequence run one at a time, in order. A step without at or at_s starts when the previous one finishes, and has no deadline.
@@ -83,7 +83,7 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
     on_stop: `on_stop, next to steps, lists steps to run at once if the sequence ends without completing: stopped by stop_when, the call's stop_when, or stop_together, cancelled, timed out, or failed. Use them to clean up, such as to stop a motion that a function started without waiting, or to say that the show stopped.
 - They run in order, each even if another fails, within 10 seconds in all, at most 20 steps.
 - They cannot wait: no wait, wait_until, stop_when, end_stop_when, or robot_move_joints, and no at_s, after, at, max_late, max_late_s, or repeat.
-- Their results are given in on_stop.
+- Their results are given in on_stop. The sequence's state and ended are set before they run, so while one is still running, status gives it in on_stop_running, and wait_s waits for them to finish.
 - Their only_if can query the labels of the main steps and of earlier on_stop steps, such as { "halt.ok": false } to run a fallback only if the on_stop step labelled halt failed.
 - Their only_if can also query _sequence, how the sequence ended: { state, stopped_by, error }, with state stopped, cancelled, timed_out, or failed, such as { "_sequence.state": "cancelled" } or { "_sequence.stopped_by.label": "stop" }. stopped_by is there only when the sequence was stopped by a condition or stop_together, and error only after a timeout or a failure, so after a cancel neither is, and $exists tells them apart, such as { "_sequence.stopped_by": { "$exists": false } }. A step without only_if runs however it ended.`,
 

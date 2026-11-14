@@ -417,7 +417,8 @@ function record(sequence: Sequence, step: SequenceStep, entry: StepResult): void
 async function waitFor(sequences: Sequence[], wait_s: number, until?: string): Promise<boolean>
 {
     const has = () => until !== undefined && sequences.some((s) => s.results.some((r) => r.label === until));
-    if (has() || sequences.every((s) => s.state !== "running")) return has();
+    // A sequence that has ended may still be running its on_stop, which settled waits for
+    if (has() || sequences.every((s) => s.settled)) return has();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let listener: ((r: StepResult) => void) | undefined;
     const label = until === undefined ? new Promise<void>(() => undefined) : new Promise<void>((resolve) =>
@@ -490,6 +491,10 @@ class Sequence
     readonly outcomes = new Map<string, { ok: boolean; skipped: boolean; result?: unknown; error?: string }>();
     /** The results of the on_stop steps, if they ran */
     on_stop_results?: StepResult[];
+    /** The on_stop step running now, which has no result yet */
+    on_stop_current?: { step: number; started_s: number };
+    /** Whether the sequence has ended and its on_stop has finished, as done has resolved */
+    settled = false;
     /** With stop_together, the sequences started in the same call, which this one stops if it ends early */
     together?: Sequence[];
 
@@ -682,7 +687,11 @@ export class SequenceRunner
         this.sequences.set(sequence.id, sequence);
         this.forgetOld();
         const timeout = setTimeout(() => sequence.controller.abort(new SequenceStopped("timed_out", `The sequence ran longer than max_duration_s, ${secondsText(p.max_duration_s)}.`)), p.max_duration_s * 1000);
-        sequence.done = this.run(sequence).finally(() => clearTimeout(timeout));
+        sequence.done = this.run(sequence).finally(() =>
+        {
+            clearTimeout(timeout);
+            sequence.settled = true;
+        });
         return sequence;
     }
 
@@ -755,7 +764,7 @@ export class SequenceRunner
 
     private forgetOld(): void
     {
-        const finished = [...this.sequences.values()].filter((s) => s.state !== "running");
+        const finished = [...this.sequences.values()].filter((s) => s.settled);
         for (const s of finished.slice(0, Math.max(0, finished.length - SEQUENCE_LIMITS.keptFinished))) this.sequences.delete(s.id);
     }
 
@@ -789,7 +798,9 @@ export class SequenceRunner
         {
             if (!Number.isInteger(step.repeat.count) || step.repeat.count < 1) throw new Error("repeat.count must be a whole number of at least 1.");
             if (!(step.repeat.every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`repeat.every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
-            if (step.repeat.count * step.repeat.every_s > max_duration_s) throw new Error("The repeats would take longer than max_duration_s.");
+            // The last run starts (count - 1) intervals after the first, which is at at_s if given, as in checkDeadlines
+            const last = round((step.at_s ?? 0) + (step.repeat.count - 1) * step.repeat.every_s);
+            if (last >= max_duration_s) throw new Error(`The last of ${step.repeat.count} runs every ${secondsText(step.repeat.every_s)} would start at ${secondsText(last)}${step.at_s ? `, counting from at_s ${step.at_s}` : ""}, but runs must start before max_duration_s, ${max_duration_s}.`);
         }
 
         const need = (field: keyof SequenceStep) =>
@@ -798,7 +809,7 @@ export class SequenceRunner
         };
         if (step.action === "wait")
         {
-            if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error("The wait action needs seconds, from 0 up to max_duration_s.");
+            if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error(step.seconds === undefined ? `The wait action needs seconds, from 0 up to max_duration_s, ${max_duration_s}.` : `The wait action needs seconds from 0 up to max_duration_s, ${max_duration_s}, but was given ${JSON.stringify(step.seconds)}.`);
             return;
         }
         if (step.action === "end_stop_when" || step.action === "noop") return;
@@ -872,7 +883,7 @@ export class SequenceRunner
 
     private async checkWaitUntil(step: SequenceStep, max_duration_s: number): Promise<void>
     {
-        if (step.action === "wait_until" && !(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
+        if (step.action === "wait_until" && !(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error(step.timeout_s === undefined ? `The wait_until action needs timeout_s, more than 0 and at most max_duration_s, ${max_duration_s}.` : `The wait_until action needs timeout_s more than 0 and at most max_duration_s, ${max_duration_s}, but was given ${JSON.stringify(step.timeout_s)}.`);
         if (step.check_every_s !== undefined && !(step.check_every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`check_every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
         const watches = this.watches(step);
         for (const [i, w] of watches.entries())
@@ -1339,6 +1350,7 @@ export class SequenceRunner
                     keep();
                     continue;
                 }
+                sequence.on_stop_current = { step: i, started_s: started };
                 try
                 {
                     if (controller.signal.aborted) throw controller.signal.reason;
@@ -1348,6 +1360,10 @@ export class SequenceRunner
                 catch (e)
                 {
                     entry.error = errorText(e);
+                }
+                finally
+                {
+                    sequence.on_stop_current = undefined;
                 }
                 entry.duration_s = round(sequence.elapsed - started);
                 keep();
@@ -1417,6 +1433,13 @@ export class SequenceRunner
         };
         report.results = results.map(absolute);
         if (sequence.on_stop_results) report.on_stop = sequence.on_stop_results.map(absolute);
+        // The sequence has ended, but its cleanup is still running, so say which step, since it has no result yet
+        const cleanup = sequence.on_stop_current;
+        if (cleanup)
+        {
+            const s = sequence.on_stop[cleanup.step]!;
+            report.on_stop_running = { step: cleanup.step, action: s.action, label: s.label, started: new Date(sequence.started.getTime() + cleanup.started_s * 1000).toISOString(), running_s: round(sequence.elapsed - cleanup.started_s) };
+        }
         if (omitted > 0) report.omitted = omitted;
         report.next_index = i;
         report.more_results = i < sequence.results.length;

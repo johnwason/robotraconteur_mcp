@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""A simulated robot using the standard Robot type, whose joints follow their commands exactly."""
+"""A simulated robot using the standard Robot type, whose joints follow their commands exactly.
+
+It runs until its stdin closes. To run it in the background, keep stdin open, such as with
+`tail -f /dev/null | python3 loopback_robot.py`."""
 import argparse
 import json
 import os
 import sys
+import threading
 import time
 
 import numpy as np
@@ -93,9 +97,11 @@ def main():
         attributes = {k: RR.VarValue(v, "string") for k, v in json.loads(args.attributes).items()}
         context.SetServiceAttributes(attributes)
         print(f"PORT {args.port}", flush=True)
+        # On a timer, so the robot still runs until its stdin closes, as it does without the option
         if args.freeze_after is not None:
-            time.sleep(args.freeze_after)
-            robot._keep_going = False
+            freeze = threading.Timer(args.freeze_after, lambda: setattr(robot, "_keep_going", False))
+            freeze.daemon = True
+            freeze.start()
         sys.stdin.read()
         robot._close()
 
