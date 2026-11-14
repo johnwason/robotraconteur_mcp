@@ -800,7 +800,7 @@ export class SequenceRunner
             if (!(step.repeat.every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`repeat.every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
             // The last run starts (count - 1) intervals after the first, which is at at_s if given, as in checkDeadlines
             const last = round((step.at_s ?? 0) + (step.repeat.count - 1) * step.repeat.every_s);
-            if (last >= max_duration_s) throw new Error(`The last of ${step.repeat.count} runs every ${step.repeat.every_s} seconds would start at ${last} seconds${step.at_s ? `, counting from at_s ${step.at_s}` : ""}, but runs must start before max_duration_s, ${max_duration_s}.`);
+            if (last >= max_duration_s) throw new Error(`The last of ${step.repeat.count} runs every ${secondsText(step.repeat.every_s)} would start at ${secondsText(last)}${step.at_s ? `, counting from at_s ${step.at_s}` : ""}, but runs must start before max_duration_s, ${max_duration_s}.`);
         }
 
         const need = (field: keyof SequenceStep) =>
