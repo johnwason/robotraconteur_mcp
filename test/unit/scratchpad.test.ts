@@ -205,6 +205,9 @@ test("in a check, a key that a step will store is accepted, and any other missin
     const pad = new Scratchpad();
     const check = new Codec(types, pad.resolver(new Set(["later"])));
     assert.equal(check.fromJson({ $scratchpad: "later.x" }, t("double"), camera), undefined);
+    // What a pending key holds now is not checked, since the step that stores it replaces it
+    pad.store("later", "old text");
+    assert.equal(check.fromJson({ $scratchpad: "later" }, t("double"), camera), undefined);
     assert.throws(() => check.fromJson({ $scratchpad: "never" }, t("double"), camera, "value"), /value: there is no scratchpad key "never", and no step stores it/);
     // Without a resolver, a marker is an ordinary object
     assert.throws(() => new Codec(types).fromJson({ $scratchpad: "x" }, t("double"), camera), /expected a double/);

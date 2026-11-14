@@ -412,11 +412,9 @@ export class Scratchpad
         return (ref: string, t: TypeDefinition, scope: ServiceDefinition, path: string, codec: Codec): unknown =>
         {
             const { key } = parsePath(ref);
-            if (!this.entries.has(key))
-            {
-                if (pending?.has(key)) return undefined;
-                if (pending) throw new CodecError(path, `there is no scratchpad key "${key}", and no step stores it with store_result.`);
-            }
+            // A key a step will store is not checked against what it holds now, which the step replaces
+            if (pending?.has(key)) return undefined;
+            if (pending && !this.entries.has(key)) throw new CodecError(path, `there is no scratchpad key "${key}", and no step stores it with store_result.`);
             const at = this.locate(ref);
             if (at.info && qualifiedTypeName(at.info.type, at.info.types, at.info.scope) === qualifiedTypeName(t, codec.types, scope)) return at.value;
             try
