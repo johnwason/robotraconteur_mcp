@@ -214,3 +214,11 @@ test("type names are written as in a service definition", () =>
         assert.equal(typeName(t(name)), name);
     }
 });
+
+test("an enum name sent as a JSON string inside the string is accepted", () =>
+{
+    assert.equal(codec.fromJson('"jog"', t("mode"), scope), 1);
+    assert.throws(() => codec.fromJson('"nope"', t("mode"), scope), /is not a value of mode/);
+    // A plain string keeps its quotes
+    assert.equal(codec.fromJson('"quoted"', t("string"), scope), '"quoted"');
+});

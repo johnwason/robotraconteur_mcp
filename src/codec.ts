@@ -353,7 +353,9 @@ export class Codec
     private enumFromJson(v: unknown, path: string, r: { def: ServiceDefinition; qualifiedName: string }): number
     {
         const e = r.def.enums.find((x) => r.qualifiedName.endsWith("." + x.name))!;
-        const raw = typeof v === "object" && v !== null ? ((v as { name?: unknown; value?: unknown }).name ?? (v as { value?: unknown }).value) : v;
+        let raw = typeof v === "object" && v !== null ? ((v as { name?: unknown; value?: unknown }).name ?? (v as { value?: unknown }).value) : v;
+        // Models sometimes send a name as a JSON string inside the string, such as "\"halt\"". No enum name has quotes
+        if (typeof raw === "string" && /^"[A-Za-z0-9_]+"$/.test(raw)) raw = raw.slice(1, -1);
         if (typeof raw === "number" && Number.isInteger(raw)) return raw;
         if (typeof raw === "string")
         {
