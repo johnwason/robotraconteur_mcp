@@ -1302,6 +1302,13 @@ export class SequenceRunner
                     }
                     entry.duration_s = round(sequence.elapsed - started);
                     record(sequence, step, entry);
+                    // A repeated generator_next stops repeating once its generator has ended, since the
+                    // runs left would only say so again. They count as skipped, not as not run
+                    if (step.action === "generator_next" && (entry.result as { done?: boolean } | undefined)?.done === true)
+                    {
+                        sequence.skipped_runs += count - k - 1;
+                        break;
+                    }
                 }
                 previous_end = sequence.elapsed;
                 if (step.label !== undefined) label_end.set(step.label, previous_end);

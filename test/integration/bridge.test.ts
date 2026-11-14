@@ -596,6 +596,8 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         // This driver gives a status when the motion ends, so one next can wait for the whole motion
         assert.ok(statuses.length >= 1, JSON.stringify(statuses));
         assert.equal(statuses[statuses.length - 1].action_status.name, "complete", JSON.stringify(statuses));
+        // robot_state can be a tick behind the complete status
+        await new Promise((resolve) => setTimeout(resolve, 200));
         const arrived = (await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" })).value.joint_position;
         assert.ok(Math.abs(arrived[0] - 0.3) < 1e-3, String(arrived[0]));
 
@@ -672,9 +674,10 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         ] }] });
         const seq = r.sequences[0];
         assert.equal(seq.state, "completed", JSON.stringify(seq));
-        assert.equal(seq.results.length, 20);
+        // It stops repeating once the generator is done
+        assert.equal(seq.results.length, 17);
         assert.equal(seq.results.filter((x: any) => x.result.done === false).length, 16);
-        assert.equal(seq.results[19].result.done, true);
+        assert.equal(seq.results[16].result.done, true);
         assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "latest" })).value, 15);
     });
 
