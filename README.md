@@ -44,6 +44,7 @@ The computer must be on the same network as the devices. Discovery listens on UD
 | `robotraconteur_read_wire`, `robotraconteur_write_wire` | Get or set the latest value of a wire |
 | `robotraconteur_read_events` | Return events the service has sent, oldest first, optionally only those of one name, with the server's current time |
 | `robotraconteur_robot_move_joints` | Move a standard robot smoothly to joint positions |
+| `robotraconteur_scratchpad` | List, read, write in place, and delete values kept in the server, so large data can go between services without passing through the model |
 | `robotraconteur_start_sequence` | Start a timed sequence of steps and return its ID immediately |
 | `robotraconteur_help` | Detailed help by category or topic: the rules and examples for sequences, and the documentation of the standard service definitions |
 | `robotraconteur_sequence_status`, `robotraconteur_cancel_sequence` | Follow a sequence and get its results, or stop it |
@@ -54,9 +55,17 @@ Tool calls sent together may run at the same time, in any order. To run calls on
 
 Services are named by `robotraconteur_discover` as `node.service`, and a name stays the same while the server runs. The service name alone also works when only one service has it. If two nodes share a node name, the later one gets part of its node ID added to the name. Sub objects are selected with paths such as `arm.tool[0]`. Enums can be given by name, and fields left out of a structure are filled with zero or empty values. Discovery runs continuously in the background, and a search can take up to 15 seconds to find a service. `robotraconteur_discover` never waits for one. While searching it returns `searching: true` and `check_again_after_s`.
 
+### Scratchpad
+
+Large results, such as camera images and trajectories, are summarized when they are over 64 KB, so the model could not pass them on, and smaller ones cost tokens and can be copied wrongly. `store_result` on `robotraconteur_get_property`, `robotraconteur_read_wire`, `robotraconteur_call_function`, and `robotraconteur_read_events`, and on the same sequence actions, keeps the result in the server under a key, and returns a summary with its type, size, and start. A generator's results are kept as a list. `{ "$scratchpad": "path" }` then stands for a kept value anywhere in a `value`, `arguments`, `generator_inputs`, or `joint_position`, including as one field of a structure given in JSON. A path is a key with any fields, indexes, and map keys, such as `img.data`, `state.joint_position[2]`, or `tags["lens"]`.
+
+A value from a service is kept as it was unpacked, with its type, and sent as it is to a member of the same type, from any service that uses that type. Anything else is converted through JSON to the type wanted, with errors that give the path. `robotraconteur_scratchpad` lists the keys, reads the value at a path, summarized as the read tools do if it is large, writes JSON at a path, converted in place to the type there, or copies a kept value when given a `$scratchpad` value, and deletes keys. Keys are shared by every call and sequence, and kept in memory until the server restarts, up to 100 keys and 256 MB.
+
+In a sequence, a `$scratchpad` value is read when its step runs, so a step can use what an earlier step stored, such as an image passed to a detector, or waypoints to move through. Before the sequences start, a path must use a key that exists or that a step of the call stores.
+
 ### Timed sequences
 
-The tool list is loaded on every turn of a conversation, so `robotraconteur_start_sequence` has a short description of the essentials, and the detailed rules below are given by `robotraconteur_help`, by topic: actions, timing, waiting, conditions, stopping, on_stop, skipping, events, and examples. The model is told to read the topics it needs, such as actions, timing, and stopping, in one call before writing its first sequence. In `robotraconteur_help`, topics give their pages, a category alone lists its topics, and an empty request lists the categories. The rules are in `src/sequence_help.ts`, kept in step with this section.
+The tool list is loaded on every turn of a conversation, so `robotraconteur_start_sequence` has a short description of the essentials, and the detailed rules below are given by `robotraconteur_help`, by topic: actions, timing, waiting, conditions, stopping, on_stop, skipping, events, scratchpad, and examples. The model is told to read the topics it needs, such as actions, timing, and stopping, in one call before writing its first sequence. In `robotraconteur_help`, topics give their pages, a category alone lists its topics, and an empty request lists the categories. The rules are in `src/sequence_help.ts`, kept in step with this section.
 
 Each tool call is a round trip through the model, which takes seconds and varies, so steps that must happen at set times run as a sequence in the server instead. `robotraconteur_start_sequence` takes a list of `sequences`, usually one, each with its steps, and returns their `sequence_id` values straight away:
 
