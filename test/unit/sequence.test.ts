@@ -220,6 +220,9 @@ test("refusals give their values and say the sequence was not started", async ()
     await assert.rejects(r.start([{ steps: [call("quick", { at_s: 3, max_late_s: 2 })] }] as SequenceSpec[]), /max_late_s 2 is before the step's at_s 3\. It must be at least at_s\. The sequence was not started\./);
     await assert.rejects(r.start([{ max_duration_s: 10, steps: [call("quick", { at_s: 3, max_late_s: 12 })] }] as SequenceSpec[]), /max_late_s 12 must be less than max_duration_s, 10\. The sequence was not started\./);
     await assert.rejects(r.start([{ max_duration_s: 10, steps: [call("quick", { at_s: 12 })] }] as SequenceSpec[]), /at_s 12 must be at least 0 and less than max_duration_s, 10\./);
+    await assert.rejects(r.start([{ max_duration_s: 1, steps: [{ action: "wait", seconds: 5 }] }] as SequenceSpec[]), /needs seconds from 0 up to max_duration_s, 1, but was given 5\./);
+    await assert.rejects(r.start([{ max_duration_s: 1, steps: [{ action: "wait_until", service: "s", name: "w", condition: {}, timeout_s: 3 }] }] as SequenceSpec[]), /at most max_duration_s, 1, but was given 3\./);
+    await assert.rejects(r.start([{ max_duration_s: 1, steps: [call("quick", { repeat: { count: 4, every_s: 0.5 } })] }] as SequenceSpec[]), /The repeats would take 2 seconds, 4 times every 0\.5, longer than max_duration_s, 1\./);
     const many = Array.from({ length: 6 }, () => call("quick", { repeat: { count: 400, every_s: 0.01 } }));
     await assert.rejects(r.start([{ max_duration_s: 100, steps: many }] as SequenceSpec[]), /are allowed\. The sequence was not started\./);
 });

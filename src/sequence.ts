@@ -789,7 +789,7 @@ export class SequenceRunner
         {
             if (!Number.isInteger(step.repeat.count) || step.repeat.count < 1) throw new Error("repeat.count must be a whole number of at least 1.");
             if (!(step.repeat.every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`repeat.every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
-            if (step.repeat.count * step.repeat.every_s > max_duration_s) throw new Error("The repeats would take longer than max_duration_s.");
+            if (step.repeat.count * step.repeat.every_s > max_duration_s) throw new Error(`The repeats would take ${step.repeat.count * step.repeat.every_s} seconds, ${step.repeat.count} times every ${step.repeat.every_s}, longer than max_duration_s, ${max_duration_s}.`);
         }
 
         const need = (field: keyof SequenceStep) =>
@@ -798,7 +798,7 @@ export class SequenceRunner
         };
         if (step.action === "wait")
         {
-            if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error("The wait action needs seconds, from 0 up to max_duration_s.");
+            if (!(typeof step.seconds === "number" && step.seconds >= 0 && step.seconds <= max_duration_s)) throw new Error(step.seconds === undefined ? `The wait action needs seconds, from 0 up to max_duration_s, ${max_duration_s}.` : `The wait action needs seconds from 0 up to max_duration_s, ${max_duration_s}, but was given ${JSON.stringify(step.seconds)}.`);
             return;
         }
         if (step.action === "end_stop_when" || step.action === "noop") return;
@@ -872,7 +872,7 @@ export class SequenceRunner
 
     private async checkWaitUntil(step: SequenceStep, max_duration_s: number): Promise<void>
     {
-        if (step.action === "wait_until" && !(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error("The wait_until action needs timeout_s, more than 0 and at most max_duration_s.");
+        if (step.action === "wait_until" && !(typeof step.timeout_s === "number" && step.timeout_s > 0 && step.timeout_s <= max_duration_s)) throw new Error(step.timeout_s === undefined ? `The wait_until action needs timeout_s, more than 0 and at most max_duration_s, ${max_duration_s}.` : `The wait_until action needs timeout_s more than 0 and at most max_duration_s, ${max_duration_s}, but was given ${JSON.stringify(step.timeout_s)}.`);
         if (step.check_every_s !== undefined && !(step.check_every_s >= SEQUENCE_LIMITS.minEvery)) throw new Error(`check_every_s must be at least ${SEQUENCE_LIMITS.minEvery}.`);
         const watches = this.watches(step);
         for (const [i, w] of watches.entries())
