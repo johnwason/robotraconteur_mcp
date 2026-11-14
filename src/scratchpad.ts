@@ -548,7 +548,13 @@ export class Scratchpad
             // A key a step will store is not checked against what it holds now, which the step replaces
             if (pending?.has(key)) return undefined;
             if (pending && !this.entries.has(key)) throw new CodecError(path, `there is no scratchpad key "${key}", and no step stores it with store_result.`);
-            const at = this.locate(ref);
+            let at = this.locate(ref);
+            // A varvalue, such as a plan in a planner's data_storage, gives the value it holds where a
+            // value of another type is wanted
+            if (at.info && at.info.type.type === "varvalue" && !at.info.type.container && t.type !== "varvalue" && at.value instanceof VarValue)
+            {
+                at = { value: at.value.value, info: { type: parseTypeDefinition(at.value.type), types: at.info.types, scope: at.info.scope }, where: `${at.where}.value` };
+            }
             if (at.info && qualifiedTypeName(at.info.type, at.info.types, at.info.scope) === qualifiedTypeName(t, codec.types, scope)) return at.value;
             try
             {

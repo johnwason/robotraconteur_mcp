@@ -207,6 +207,9 @@ test("a marker sends a value of the same type as it is, and converts any other",
     assert.deepEqual([...codec.fromJson({ $scratchpad: "pose" }, t("double[]"), camera) as Float64Array], [0.1, 0.2]);
     assert.deepEqual([...codec.fromJson({ $scratchpad: "img.header.stamp" }, t("single[]"), camera) as Float32Array], [1, 2]);
     assert.throws(() => codec.fromJson({ $scratchpad: "img.encoding" }, t("double"), camera), /from scratchpad img\.encoding, a string/);
+    // A varvalue gives the value it holds where another type is wanted, and stays a varvalue where one is
+    assert.deepEqual([...codec.fromJson({ $scratchpad: "img.extra" }, t("double[]"), camera) as Float64Array], [9, 8]);
+    assert.ok(codec.fromJson({ $scratchpad: "img.extra" }, t("varvalue"), camera) instanceof VarValue);
 });
 
 test("in a check, a key that a step will store is accepted, and any other missing key is refused", () =>
