@@ -285,11 +285,11 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
             { action: "stop_when", name: "robot_state", condition: { "controller_state.name": "emergency_stop" }, label: "fault" },
             { action: "wait", seconds: 20 }] });
         assert.equal(report.state, "stopped", JSON.stringify(report));
-        assert.match(report.stopped_by.error, /robot_state has not updated for 5 seconds: its seqno has stayed at \d+ since/);
+        assert.match(report.stopped_by.error, /robot_state has not updated for at least 5 seconds: its seqno has stayed at \d+ in every read since/);
         assert.ok(report.elapsed_s < 7, String(report.elapsed_s));
         const later = await ok(bridge, "robotraconteur_read_wire", { service, name: "robot_state" });
         assert.equal(later.value.seqno, first.value.seqno);
-        assert.match(later.not_updating, /has not updated for \d+ seconds/);
+        assert.match(later.not_updating, /has not updated for at least \d+ seconds/);
         await ok(bridge, "robotraconteur_read_wire", { service: "robot_a.robot", name: "robot_state" }).then((r) => assert.equal(r.not_updating, undefined, "a running robot is not flagged"));
     });
 

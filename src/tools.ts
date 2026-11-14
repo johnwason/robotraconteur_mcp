@@ -371,7 +371,7 @@ export class BridgeTools
     /** The message for a wire whose sequence number has stopped changing */
     private notUpdating(name: string, u: { seqno: string; since: number; seconds: number }): string
     {
-        return `${name} has not updated for ${Math.round(u.seconds)} seconds: its seqno has stayed at ${u.seqno} since ${new Date(u.since).toISOString()}. The device may have stopped sending new values, such as a driver that is no longer running, so this value is out of date.`;
+        return `${name} has not updated for at least ${Math.round(u.seconds)} seconds: its seqno has stayed at ${u.seqno} in every read since ${new Date(u.since).toISOString()}, and may have stopped changing before then. The device may have stopped sending new values, such as a driver that is no longer running, so this value is out of date.`;
     }
 
     async readWire(service: string, object: string | undefined, name: string): Promise<Record<string, unknown>>
@@ -480,7 +480,13 @@ export class BridgeTools
         const stub = await this.registry.resolve(service, object);
         robotMember(stub);
 
-        const state = async () => (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array; seqno: bigint };
+        // Its reads are noted as read_wire's are, so a robot that stops updating after a motion is seen sooner
+        const state = async () =>
+        {
+            const value = (await stub.peekWireInValue("robot_state")).value as { joint_position: Float64Array; seqno: bigint };
+            this.unchangedFor(service, object, "robot_state", value);
+            return value;
+        };
         // A robot whose state has stopped updating would never be seen to arrive, so it is not moved
         const first = await state();
         if (seqnoOf(first) !== undefined)
