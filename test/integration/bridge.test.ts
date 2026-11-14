@@ -2017,6 +2017,21 @@ describe("the scratchpad", { timeout: 300000 }, () =>
         await moveRobot(service, [0, 0, 0, 0, 0, 0], 0.5);
     });
 
+    test("a generator next that gives done keeps the value its store_result key already holds", async () =>
+    {
+        const { generator } = await ok(bridge, "robotraconteur_call_function", { service: PLANNER, name: "plan_trajectory", arguments: [[0, 0, 0, 0, 0, 0], 1] });
+        const names: string[] = [];
+        for (let i = 0; i < 4; i++)
+        {
+            const r = await ok(bridge, "robotraconteur_generator", { generator, action: "next", store_result: "plan_zero" });
+            if (r.done) continue;
+            names.push((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "plan_zero.action_status" })).value.name);
+        }
+        assert.deepEqual(names, ["running", "complete"]);
+        assert.equal((await ok(bridge, "robotraconteur_scratchpad", { action: "get", path: "plan_zero.action_status" })).value.name, "complete");
+        await ok(bridge, "robotraconteur_scratchpad", { action: "delete", path: "plan_zero" });
+    });
+
     test("a long trajectory planned from the robot's position is executed from the scratchpad", { timeout: 90000 }, async () =>
     {
         const service = "robot_b.robot";
