@@ -24,10 +24,40 @@ import { isStandardService } from "./standard_help.js";
 export const HELP_CATEGORIES = ["sequences", "standard_service_types"] as const;
 export type HelpCategory = typeof HELP_CATEGORIES[number];
 
+/** Notes on using a standard service through these tools, which its page does not give, shown first */
+const STANDARD_USAGE: Record<string, string> = {
+    "com.robotraconteur.robotics.robot": "Usage: command_mode can only change from halt to another mode, or from any mode to halt, so set halt and then trajectory before execute_trajectory. The motion begins at the first next of the generator execute_trajectory returns, and ends with a complete status. A driver may leave joint_velocity, joint_effort, and the command arrays empty when the robot does not report them."
+};
+
+/**
+ * A standard service's page as served: its usage note first, then the page, with the lists of imports
+ * and using statements, which are long, shortened to the types used from each service
+ */
+function standardPage(name: string): string
+{
+    let page = STANDARD_DOCS[name]!.page;
+    const imports = /\n### Imports\n[\s\S]*?(?=\n#)/.exec(page);
+    const using = /\n### Using Statements\n[\s\S]*?(?=\n#)/.exec(page);
+    if (imports && using)
+    {
+        const by_service = new Map<string, string[]>();
+        for (const m of using[0].matchAll(/^- `([A-Za-z0-9_.]+)\.([A-Za-z0-9_]+)`/gm))
+        {
+            const list = by_service.get(m[1]!) ?? [];
+            list.push(m[2]!);
+            by_service.set(m[1]!, list);
+        }
+        const lines = [...by_service].map(([service, types]) => `- ${service}: ${types.join(", ")}`);
+        page = page.replace(using[0], "").replace(imports[0], `\n### Types used from other services, on their pages\n\n${lines.join("\n")}\n`);
+    }
+    const usage = STANDARD_USAGE[name];
+    return usage ? `${usage}\n\n${page}` : page;
+}
+
 function standardIndex(): string
 {
     const lines = Object.entries(STANDARD_DOCS).map(([name, d]) => `- ${name}: ${d.summary}`);
-    return `## standard_service_types\nThe standard service definitions, used by robots, cameras, sensors, and other devices. Their robdefs carry little documentation, to keep them small, so it is here. Each is a topic by its full name, such as com.robotraconteur.robotics.robot. A page lists the services it imports and the types it uses from them, which are on those services' pages.\n${lines.join("\n")}`;
+    return `## standard_service_types\nThe standard service definitions, used by robots, cameras, sensors, and other devices. Their robdefs carry little documentation, to keep them small, so it is here. Each is a topic by its full name, such as com.robotraconteur.robotics.robot. A page lists the types it uses from other services, which are on those services' pages.\n${lines.join("\n")}`;
 }
 
 /** A topic by name, ignoring case: a sequence topic or a standard service definition */
@@ -84,7 +114,7 @@ export function help(category?: HelpCategory, topics?: string[]): string
         }
         if (given.has(found.name)) continue;
         given.add(found.name);
-        parts.push(found.kind === "sequence" ? sequenceHelp([found.name]) : STANDARD_DOCS[found.name]!.page);
+        parts.push(found.kind === "sequence" ? sequenceHelp([found.name]) : standardPage(found.name));
     }
     if (unknown.length > 0)
     {

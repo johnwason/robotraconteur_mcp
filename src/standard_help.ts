@@ -46,5 +46,5 @@ export function standardDocsNote(object_type: string, member_type_names?: Iterab
     if (pages.size === 0) return undefined;
     const list = [...pages];
     const which = list.length === 1 ? `topic ${list[0]}` : `topics ${list.join(", ")}`;
-    return `This uses standard service types, whose robdefs carry little documentation. Read robotraconteur_help ${which}; a page lists the services it imports and the types it uses from them. Category standard_service_types lists them all.`;
+    return `This uses standard service types, whose robdefs carry little documentation. Read robotraconteur_help ${which}; a page lists the types it uses from other services. Category standard_service_types lists them all.`;
 }

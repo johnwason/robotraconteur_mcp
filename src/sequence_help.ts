@@ -37,7 +37,7 @@ export const HELP_TOPIC_SUMMARIES: Record<HelpTopic, string> = {
 const HELP: Record<HelpTopic, string> = {
     actions: `Actions take the arguments of the tool of the same name, on the step's service, or the sequence's service if the step names none. Steps can use different services.
 - get_property (name), set_property (name, value), read_wire (name), write_wire (name, value).
-- call_function (name, arguments as an array or an object keyed by parameter name, and for a generator generator_inputs and timeout_s, default 60). Its result is the function's return value. A generator runs to its end, and its result is how it ran and its last results.
+- call_function (name, arguments as an array or an object keyed by parameter name, and for a generator generator_inputs and timeout_s, default 60). Its result is the function's return value. A generator starts at once and runs to its end, and its result is how it ran and its last results.
 - generator_next (generator, value if it takes one, store_result), generator_close and generator_abort (generator): act on a generator that robotraconteur_call_function started. A direct robotraconteur_generator next holds you until the service answers, which for a trajectory can be the whole motion. To follow a long operation without waiting on it:
   1. Start it with robotraconteur_call_function, which returns a generator id. An operation such as a robot's execute_trajectory begins only at the first next, so time from that.
   2. Start a one-step generator_next sequence without wait_s. wait_s would hold the call until the next returns, as a direct next does.
@@ -97,6 +97,7 @@ Limits: at most ${SEQUENCE_LIMITS.maxSteps} steps and ${SEQUENCE_LIMITS.maxRuns}
 
     skipping: `only_if on a step runs it only if a MongoDB query holds, and otherwise skips it completely, giving skipped in its result.
 - It queries the outcomes of earlier labelled steps by label, each { ok, skipped, result, error }: such as { "answer.ok": true } to run only if the step labelled answer succeeded, { "answer.ok": false } only if it failed (which needs continue_on_error on that step so that the sequence goes on), or { "answer.result.event.arguments.message": "yes" } on what it returned. To act on a value, read it in an earlier labelled step, such as get_property.
+- It takes the same queries as a condition, so $expr works too, with a step's outcome as $label, such as { "$expr": { "$eq": [{ "$toLower": "$answer.result.event.arguments.message" }, "blue"] } } to match any case.
 - It is decided as soon as the step comes up, before any wait for its at_s or after time, so a skipped step does not wait, does not hold up the steps after it, and none of its repeats run.
 - A skipped step counts as finished when it was skipped, so after on it times from then. To time a step from whichever branch ran, use after on the step both branches follow, such as the wait_until they depend on.
 - In on_stop steps it can also query _sequence and earlier on_stop steps (see on_stop). There is no other branching: no else, no loops, no jumps.`,

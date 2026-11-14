@@ -277,7 +277,7 @@ describe("the MCP bridge", { timeout: 300000 }, () =>
         assert.doesNotMatch(list, /## timing/, "a category gives only its own topics");
         const page = (await call(bridge, "robotraconteur_help", { topics: ["com.robotraconteur.robotics.robot"] })).content[0]!.text;
         assert.match(page, /## Object: Robot/);
-        assert.match(page, /### Using Statements/, "kept, so other types can be followed to their pages");
+        assert.match(page, /### Types used from other services, on their pages\n\n- com\.robotraconteur\.geometry: Point, /, "kept short, so other types can be followed to their pages");
 
         const robot = await ok(bridge, "robotraconteur_describe", { service: "robot_a.robot" });
         assert.match(robot.standard_docs, /^This uses standard service types.*Read robotraconteur_help topic com\.robotraconteur\.robotics\.robot;/);
