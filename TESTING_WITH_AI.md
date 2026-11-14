@@ -24,9 +24,12 @@ Then start each of these in its own terminal, from this folder:
 python test/services/instrumented_reynard.py
 python test/services/loopback_robot.py --nodename left_arm --port 52701 --attributes "{\"site\":\"lab\"}"
 python test/services/loopback_robot.py --nodename right_arm --port 52702
+python test/services/trajectory_planner.py
 ```
 
 Reynard's web page is at http://localhost:29201, so you can watch it move.
+
+`trajectory_planner.py` is a `planner` service that plans as the [Tesseract Robot Raconteur service](https://github.com/tesseract-robotics/tesseract_robotraconteur)'s task executor `run` does: each function returns a generator of `PlanStatus`, which reports `running` while it plans, then `complete` with the plan in `data_storage` under `trajectory`, a varvalue `JointTrajectory` for the simulated robots with waypoints 50 ms apart. `plan_move(current_position, target_position, duration)` moves smoothly between joint positions, within the joint and velocity limits, and `plan_trajectory(current_position, duration)` swings each joint up to 0.3 rad from `current_position` and back. A plan can be passed to a robot's `execute_trajectory` in `trajectory` command mode. A long plan is too large to return to the model, so it tests keeping generator results in the scratchpad.
 
 `instrumented_reynard.py` runs Reynard as `python -m reynard_the_robot` does, and adds a `reynard_diagnostics` service on the same node, so tests can run without anyone typing in the web page:
 

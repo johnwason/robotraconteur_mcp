@@ -17,12 +17,14 @@
 
 import { performance } from "node:perf_hooks";
 import { compileCondition } from "./condition.js";
+import { cloneValue } from "./scratchpad.js";
 import { errorText } from "./errors.js";
 import type { ReceivedEvent } from "./registry.js";
-import { untilAborted } from "./tools.js";
+import { NATIVE, untilAborted } from "./tools.js";
+import type { NativeValue } from "./tools.js";
 import type { BridgeTools } from "./tools.js";
 
-export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "robot_move_joints", "wait", "wait_until", "stop_when", "end_stop_when", "noop"] as const;
+export const SEQUENCE_ACTIONS = ["get_property", "set_property", "call_function", "read_wire", "write_wire", "read_events", "wait", "wait_until", "stop_when", "end_stop_when", "noop", "generator_next", "generator_close", "generator_abort"] as const;
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number];
 
 /** One of the things a wait_until step watches, with its own condition */
@@ -113,8 +115,6 @@ export interface SequenceStep
     arguments?: unknown;
     generator_inputs?: unknown[];
     timeout_s?: number;
-    joint_position?: number[];
-    duration_s?: number;
     seconds?: number;
     condition?: Record<string, unknown>;
     new_events_only?: boolean;
@@ -130,6 +130,8 @@ export interface SequenceStep
     max_late_s?: number;
     only_if?: Record<string, unknown>;
     target?: string;
+    generator?: string;
+    store_result?: string;
     repeat?: { count: number; every_s: number };
     continue_on_error?: boolean;
 }
@@ -141,23 +143,25 @@ export type ResultDetail = "compact" | "full";
 
 /** The fields each action uses, besides those every step can have */
 const ACTION_FIELDS: Record<SequenceAction, (keyof SequenceStep)[]> = {
-    get_property: ["service", "object", "name"],
+    get_property: ["service", "object", "name", "store_result"],
     set_property: ["service", "object", "name", "value"],
-    call_function: ["service", "object", "name", "arguments", "generator_inputs", "timeout_s"],
-    read_wire: ["service", "object", "name"],
+    call_function: ["service", "object", "name", "arguments", "generator_inputs", "timeout_s", "store_result"],
+    read_wire: ["service", "object", "name", "store_result"],
     write_wire: ["service", "object", "name", "value"],
-    read_events: ["service", "name", "clear", "limit"],
-    robot_move_joints: ["service", "object", "joint_position", "duration_s"],
+    read_events: ["service", "name", "clear", "limit", "store_result"],
     wait: ["seconds"],
     wait_until: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "timeout_s", "check_every_s"],
     stop_when: ["service", "object", "name", "condition", "watch", "combine", "new_events_only", "check_every_s"],
     end_stop_when: ["target"],
-    noop: []
+    noop: [],
+    generator_next: ["generator", "value", "store_result"],
+    generator_close: ["generator"],
+    generator_abort: ["generator"]
 };
 const COMMON_FIELDS: (keyof SequenceStep)[] = ["action", "label", "at_s", "after", "at", "max_late", "max_late_s", "only_if", "repeat", "continue_on_error"];
 
 /** Actions on_stop cannot use, since they wait, and fields it cannot use, since they schedule */
-const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "robot_move_joints"];
+const ON_STOP_REFUSED_ACTIONS: SequenceAction[] = ["wait", "wait_until", "stop_when", "end_stop_when", "generator_next"];
 const ON_STOP_REFUSED_FIELDS: (keyof SequenceStep)[] = ["at_s", "after", "at", "max_late", "max_late_s", "repeat", "continue_on_error"];
 /** The most steps on_stop can have, and how long they can take together */
 const MAX_ON_STOP = 20;
@@ -179,7 +183,9 @@ export const SEQUENCE_LIMITS = {
 const MAX_STATUS_BYTES = 64 * 1024;
 const MAX_STATUS_RESULTS = 200;
 /** Actions that stop by themselves when the sequence is aborted */
-const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "robot_move_joints"];
+const SIGNALLED: SequenceAction[] = ["wait", "wait_until", "call_function", "generator_next"];
+/** Actions whose result is data, so that the last one is kept when the sequence ends */
+const DATA_ACTIONS: SequenceAction[] = ["get_property", "read_wire", "call_function", "read_events", "generator_next"];
 /** The most things one wait_until step can watch */
 const MAX_WATCH = 10;
 /** The most of each value shown when a wait_until times out */
@@ -317,9 +323,10 @@ const HELP_FOR_ERROR: [RegExp, string][] = [
     [/on_stop/, "on_stop"],
     [/\bat_s\b|max_late|\bafter (must|cannot)|cannot tell which one is meant|\bat, |\bat is an absolute|ISO 8601 time/, "timing"],
     [/outside its limits/, "actions"],
+    [/scratchpad|store_result/, "scratchpad"],
     [/\bwatch\b|combine|timeout_s/, "waiting"],
     [/stop_when|\btarget\b/, "stopping"],
-    [/action needs|joint_position|repeat|limit must/, "actions"]
+    [/action needs|repeat|limit must/, "actions"]
 ];
 
 function withHelpTopic(message: string): string
@@ -495,6 +502,10 @@ class Sequence
     on_stop_current?: { step: number; started_s: number };
     /** Whether the sequence has ended and its on_stop has finished, as done has resolved */
     settled = false;
+    /** The last result of a main step that returned data, kept in the scratchpad when the sequence ends */
+    last_result?: { json: unknown; native?: NativeValue };
+    /** The scratchpad key of last_result, once the sequence has ended */
+    kept_as?: string;
     /** With stop_together, the sequences started in the same call, which this one stops if it ends early */
     together?: Sequence[];
 
@@ -550,12 +561,14 @@ export class SequenceRunner
         const labels = specs.map((s) => s.label).filter((l) => l !== undefined);
         const repeated = labels.find((l, i) => labels.indexOf(l) !== i);
         if (repeated !== undefined) throw new Error(`The label "${repeated}" is used by more than one sequence. Give them different labels.`);
+        // A step can use a scratchpad key that a step of these sequences will store, which need not exist yet
+        const pending = new Set(specs.flatMap((spec) => [...(spec.steps ?? []), ...(spec.on_stop ?? [])]).map((step) => step.store_result).filter((k) => typeof k === "string"));
         const prepared: PreparedSequence[] = [];
         for (const [i, spec] of specs.entries())
         {
             try
             {
-                prepared.push(await this.prepare(spec));
+                prepared.push(await this.prepare(spec, pending));
             }
             catch (e)
             {
@@ -610,7 +623,7 @@ export class SequenceRunner
     }
 
     /** Check one sequence, before anything starts */
-    private async prepare(spec: SequenceSpec): Promise<PreparedSequence>
+    private async prepare(spec: SequenceSpec, pending: ReadonlySet<string>): Promise<PreparedSequence>
     {
         const { service, steps: given_steps = [], on_stop: given_on_stop = [], max_duration_s = SEQUENCE_LIMITS.defaultDuration } = spec;
         const with_service = (s: SequenceStep) => service !== undefined && s.service === undefined && ACTION_FIELDS[s.action]?.includes("service") ? { ...s, service } : s;
@@ -628,7 +641,7 @@ export class SequenceRunner
                 if (step.label === SEQUENCE_KEY) throw new Error(`The label ${SEQUENCE_KEY} is kept for on_stop's only_if. Use another label.`);
                 // An on_stop step's only_if can query the main steps, and the on_stop steps before it
                 if (step.only_if !== undefined) checkOnlyIf(step.only_if, [...steps, ...on_stop.slice(0, i)], [...steps, ...on_stop], true);
-                await this.check(step, SEQUENCE_LIMITS.maxDuration);
+                await this.check(step, SEQUENCE_LIMITS.maxDuration, pending);
             }
             catch (e)
             {
@@ -659,7 +672,7 @@ export class SequenceRunner
                     if (earlier.length === 0) throw new Error("There is no earlier stop_when step to end.");
                     if (step.target !== undefined && !earlier.some((s) => s.label === step.target)) throw new Error(`target must be the label of an earlier stop_when step, and none has the label "${step.target}". Leave target out to end every stop_when.`);
                 }
-                await this.check(step, max_duration_s);
+                await this.check(step, max_duration_s, pending);
             }
             catch (e)
             {
@@ -768,7 +781,7 @@ export class SequenceRunner
         for (const s of finished.slice(0, Math.max(0, finished.length - SEQUENCE_LIMITS.keptFinished))) this.sequences.delete(s.id);
     }
 
-    private async check(step: SequenceStep, max_duration_s: number): Promise<void>
+    private async check(step: SequenceStep, max_duration_s: number, pending: ReadonlySet<string> = new Set()): Promise<void>
     {
         if (!SEQUENCE_ACTIONS.includes(step.action)) throw new Error(`Unknown action "${String(step.action)}". Use one of: ${SEQUENCE_ACTIONS.join(", ")}.`);
         const unused = Object.keys(step).filter((k) => step[k as keyof SequenceStep] !== undefined && !COMMON_FIELDS.includes(k as keyof SequenceStep) && !ACTION_FIELDS[step.action].includes(k as keyof SequenceStep));
@@ -813,6 +826,13 @@ export class SequenceRunner
             return;
         }
         if (step.action === "end_stop_when" || step.action === "noop") return;
+        if (step.action === "generator_next" || step.action === "generator_close" || step.action === "generator_abort")
+        {
+            need("generator");
+            this.tools.checkGenerator(step.generator!, step.action === "generator_next", step.value, pending);
+            if (step.store_result !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(step.store_result)) throw new Error(`store_result must be a key, such as img, not "${step.store_result}".`);
+            return;
+        }
         if (step.action === "wait_until" || step.action === "stop_when")
         {
             if (step.action === "stop_when" && step.repeat) throw new Error("A stop_when step cannot repeat.");
@@ -826,29 +846,23 @@ export class SequenceRunner
         case "get_property":
         case "read_wire":
             need("name");
-            await this.tools.check(service, step.object, step.action === "get_property" ? "property" : "wire", step.name!);
+            await this.tools.check(service, step.object, step.action === "get_property" ? "property" : "wire", step.name!, undefined, undefined, pending, step.store_result);
             break;
         case "set_property":
         case "write_wire":
             need("name");
             if (!("value" in step)) throw new Error(`The ${step.action} action needs value.`);
-            await this.tools.check(service, step.object, step.action === "set_property" ? "property" : "wire", step.name!, step.value);
+            await this.tools.check(service, step.object, step.action === "set_property" ? "property" : "wire", step.name!, step.value, undefined, pending);
             break;
         case "call_function":
             need("name");
             if (step.timeout_s !== undefined && !(step.timeout_s > 0)) throw new Error("timeout_s must be more than 0.");
-            await this.tools.check(service, step.object, "function", step.name!, step.arguments ?? [], step.generator_inputs);
+            await this.tools.check(service, step.object, "function", step.name!, step.arguments ?? [], step.generator_inputs, pending, step.store_result);
             break;
         case "read_events":
             if (step.limit !== undefined && !(Number.isInteger(step.limit) && step.limit > 0 && step.limit <= 200)) throw new Error("limit must be a whole number from 1 to 200.");
-            if (step.name !== undefined) await this.tools.check(service, undefined, "event", step.name);
-            else await this.tools.check(service, undefined, "service", "");
-            break;
-        case "robot_move_joints":
-            need("joint_position");
-            if (!(typeof step.duration_s === "number" && step.duration_s > 0 && step.duration_s <= 100)) throw new Error("The robot_move_joints action needs duration_s, more than 0 and at most 100.");
-            if (!Array.isArray(step.joint_position) || !step.joint_position.every((x) => Number.isFinite(x))) throw new Error("joint_position must be an array of numbers.");
-            await this.tools.check(service, step.object, "robot", "", step.joint_position);
+            if (step.name !== undefined) await this.tools.check(service, undefined, "event", step.name, undefined, undefined, pending, step.store_result);
+            else await this.tools.check(service, undefined, "service", "", undefined, undefined, pending, step.store_result);
             break;
         }
     }
@@ -915,9 +929,18 @@ export class SequenceRunner
         }
     }
 
-    private async act(step: SequenceStep, signal: AbortSignal, sequence?: Sequence): Promise<unknown>
+    /**
+     * Run a step's action and return its result. sink, if given, receives the value a data result was
+     * made from, as received, for the sequence's last result
+     */
+    private async act(step: SequenceStep, signal: AbortSignal, sequence?: Sequence, sink?: { native?: NativeValue }): Promise<unknown>
     {
         const s = step.service!;
+        const note = <T extends object>(r: T): T =>
+        {
+            if (sink) sink.native = (r as Record<symbol, NativeValue | undefined>)[NATIVE];
+            return r;
+        };
         switch (step.action)
         {
         case "wait":
@@ -926,27 +949,36 @@ export class SequenceRunner
         case "noop":
             return null;
         case "get_property":
-            return (await this.tools.getProperty(s, step.object, step.name!)).value;
+        {
+            const r = note(await this.tools.getProperty(s, step.object, step.name!, step.store_result));
+            return "value" in r ? r.value : r;
+        }
         case "set_property":
             await this.tools.setProperty(s, step.object, step.name!, step.value);
             return null;
         case "call_function":
         {
             // The function's return value itself, or for a generator, how it ran and its last results
-            const r = await this.tools.callFunction(s, step.object, step.name!, step.arguments ?? [], step.generator_inputs, step.timeout_s ?? 60, signal);
+            const r = note(await this.tools.callFunction(s, step.object, step.name!, step.arguments ?? [], step.generator_inputs, step.timeout_s ?? 60, signal, step.store_result));
             return "result" in r ? r.result : r;
         }
         case "read_wire":
-            return await this.tools.readWire(s, step.object, step.name!);
+            return note(await this.tools.readWire(s, step.object, step.name!, step.store_result));
         case "write_wire":
             await this.tools.writeWire(s, step.object, step.name!, step.value);
             return null;
         case "read_events":
-            return (await this.tools.readEvents(s, step.clear ?? true, step.limit ?? 50, step.name)).events;
-        case "robot_move_joints":
-            return await this.tools.robotMoveJoints(s, step.object, step.joint_position!, step.duration_s!, signal);
+        {
+            const r = await this.tools.readEvents(s, step.clear ?? true, step.limit ?? 50, step.name, step.store_result);
+            return "events" in r ? r.events : r;
+        }
         case "wait_until":
             return await this.waitUntil(step, signal, sequence);
+        case "generator_next":
+            return note(await this.tools.generatorNext(step.generator!, step.value, step.store_result, signal, false));
+        case "generator_close":
+        case "generator_abort":
+            return await this.tools.generatorEnd(step.generator!, step.action === "generator_abort");
         }
     }
 
@@ -1254,11 +1286,12 @@ export class SequenceRunner
                     // Steps with a deadline always report their lateness, so that their timing can be read directly
                     if (latest !== undefined) entry.late_s = round(Math.max(0, started - scheduled));
                     else if (started - scheduled > LATE_REPORTED_S) entry.late_s = round(started - scheduled);
+                    const sink: { native?: NativeValue } = {};
                     try
                     {
-                        // A robot motion, a generator, or a wait stops itself when aborted, halting a robot
-                        // first, so it is waited for. Other requests are left to finish in the background
-                        const action = step.action === "stop_when" ? this.startStopWhen(sequence, step, i) : step.action === "end_stop_when" ? Promise.resolve(this.endStopWhen(sequence, step)) : this.act(step, signal, sequence);
+                        // A generator or a wait stops itself when aborted, so it is waited for. Other
+                        // requests are left to finish in the background
+                        const action = step.action === "stop_when" ? this.startStopWhen(sequence, step, i) : step.action === "end_stop_when" ? Promise.resolve(this.endStopWhen(sequence, step)) : this.act(step, signal, sequence, sink);
                         const result = SIGNALLED.includes(step.action) ? await action : await untilAborted(action, signal);
                         if (result !== null && result !== undefined) entry.result = result;
                     }
@@ -1274,6 +1307,17 @@ export class SequenceRunner
                     }
                     entry.duration_s = round(sequence.elapsed - started);
                     record(sequence, step, entry);
+                    if (DATA_ACTIONS.includes(step.action) && entry.result !== undefined && (entry.result as { done?: boolean }).done !== true)
+                    {
+                        sequence.last_result = { json: entry.result, native: sink.native };
+                    }
+                    // A repeated generator_next stops repeating once its generator has ended, since the
+                    // runs left would only say so again. They count as skipped, not as not run
+                    if (step.action === "generator_next" && (entry.result as { done?: boolean } | undefined)?.done === true)
+                    {
+                        sequence.skipped_runs += count - k - 1;
+                        break;
+                    }
                 }
                 previous_end = sequence.elapsed;
                 if (step.label !== undefined) label_end.set(step.label, previous_end);
@@ -1300,6 +1344,9 @@ export class SequenceRunner
             if (sequence.state !== "completed" && sequence.current) sequence.stopped_at = { step: sequence.current.step, iteration: sequence.current.iteration, waiting: sequence.current.waiting };
             sequence.current = undefined;
             sequence.finished_s = sequence.elapsed;
+            // The last data result is kept, however the sequence ended, as a copy so that it stays as it was
+            const last = sequence.last_result;
+            if (last && this.tools.scratchpad) sequence.kept_as = last.native ? this.tools.scratchpad.keepResult(cloneValue(last.native.value), last.native.info) : this.tools.scratchpad.keepResult(cloneValue(last.json));
             sequence.ended = new Date();
         }
         if (sequence.state !== "completed")
@@ -1425,6 +1472,7 @@ export class SequenceRunner
         const not_run = sequence.total_runs - sequence.skipped_runs - sequence.results.length;
         if (sequence.state !== "running" && not_run > 0) report.not_run = not_run;
         if (sequence.error) report.error = sequence.error;
+        if (sequence.kept_as) report.kept_as = sequence.kept_as;
         // Each result also gives its start as an absolute time, so results can be compared across sequences
         const absolute = (r: StepResult) =>
         {

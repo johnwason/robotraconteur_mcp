@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseServiceDefinition, parseTypeDefinition, VarValue } from "robotraconteur";
 import { TypeContext } from "robotraconteur/internal";
-import { Codec, CodecError } from "../../src/codec.js";
+import { Codec, CodecError, typeName } from "../../src/codec.js";
 
 const def = parseServiceDefinition(`
 service example.codec
@@ -205,4 +205,29 @@ test("errors say what is wrong and where, so that the model can correct them", (
 test("a single number is accepted for an array", () =>
 {
     assert.deepEqual(codec.fromJson(2, t("double[]"), scope), [2]);
+});
+
+test("type names are written as in a service definition", () =>
+{
+    for (const name of ["double", "double[]", "double[3]", "double[6-]", "int32[*]", "int32[2,3]", "string{list}", "double[]{int32}", "inner{string}"])
+    {
+        assert.equal(typeName(t(name)), name);
+    }
+});
+
+test("an enum name sent as a JSON string inside the string is accepted", () =>
+{
+    assert.equal(codec.fromJson('"jog"', t("mode"), scope), 1);
+    assert.throws(() => codec.fromJson('"nope"', t("mode"), scope), /is not a value of mode/);
+    // A plain string keeps its quotes
+    assert.equal(codec.fromJson('"quoted"', t("string"), scope), '"quoted"');
+});
+
+test("long lists and arrays of structures are summarized too", () =>
+{
+    const items = Array.from({ length: 50 }, (_, i) => ({ a: i, b: "x" }));
+    const summary = codec.toJson(items, t("inner{list}"), scope, { maxArray: 4 }) as { truncated: boolean; length: number; first: unknown[] };
+    assert.deepEqual(summary, { truncated: true, length: 50, first: items.slice(0, 4) });
+    assert.equal((codec.toJson(items, t("inner{list}"), scope) as unknown[]).length, 50);
+    assert.deepEqual(codec.toJson(items.slice(0, 3), t("inner{list}"), scope, { maxArray: 4 }), items.slice(0, 3));
 });

@@ -82,6 +82,17 @@ function numericArrayToJson(a: ArrayLike<unknown>, p: PrimitiveInfo, limit?: Arr
     };
 }
 
+/**
+ * Convert the items of a list or an array of structures. With a limit, a long one is summarized, as a
+ * numeric array is: its length and its first items, converted. Only those are converted, so a large
+ * value is summarized quickly
+ */
+function summarizedItems(a: unknown[], item: (x: unknown) => unknown, limit?: ArrayLimit): unknown
+{
+    if (!limit || a.length <= limit.maxArray) return a.map(item);
+    return { truncated: true, length: a.length, first: a.slice(0, limit.maxArray).map(item) };
+}
+
 function parseNumber(v: unknown, path: string, p: PrimitiveInfo): number
 {
     if (typeof v === "number") return v;
@@ -156,8 +167,10 @@ function typedArrayFromJson(v: unknown, path: string, p: PrimitiveInfo): unknown
 function typeName(t: TypeDefinition): string
 {
     let s = t.type;
-    if (t.array === "multidimarray") s += t.arrayLength ? `[${t.arrayLength.join(",")}]` : "[*]";
-    else if (t.array === "array") s += t.arrayLength ? `[${t.arrayLength[0]}${t.arrayVarLength ? "-" : ""}]` : "[]";
+    // The parser gives [] as length 0 with variable length, and [*] as variable length with no dims
+    const length = t.arrayLength?.[0] ?? 0;
+    if (t.array === "multidimarray") s += t.arrayVarLength || !t.arrayLength?.length ? "[*]" : `[${t.arrayLength.join(",")}]`;
+    else if (t.array === "array") s += length === 0 ? "[]" : `[${length}${t.arrayVarLength ? "-" : ""}]`;
     if (t.container === "list") s += "{list}";
     else if (t.container === "map_int32") s += "{int32}";
     else if (t.container === "map_string") s += "{string}";
@@ -167,10 +180,25 @@ function typeName(t: TypeDefinition): string
 
 export { typeName };
 
+/** The marker for a value kept in the scratchpad, such as { "$scratchpad": "img.data" } */
+export const REF_KEY = "$scratchpad";
+
+/** Whether a JSON value is a scratchpad marker. No Robot Raconteur name starts with $, so it cannot be a field */
+export function isRef(v: unknown): v is { [REF_KEY]: string }
+{
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+    const keys = Object.keys(v);
+    return keys.length === 1 && keys[0] === REF_KEY && typeof (v as Record<string, unknown>)[REF_KEY] === "string";
+}
+
+/** Gives the value a scratchpad marker points to, converted to the type wanted at that place */
+export type RefResolver = (ref: string, t: TypeDefinition, scope: ServiceDefinition, path: string, codec: Codec) => unknown;
+
 /** Converts between Robot Raconteur values and JSON, using the types in the service definitions */
 export class Codec
 {
-    constructor(private types: TypeContext) {}
+    /** @param refs Resolves scratchpad markers met by fromJson. Without it, a marker is an ordinary object */
+    constructor(readonly types: TypeContext, private refs?: RefResolver) {}
 
     private namedFields(t: TypeDefinition, scope: ServiceDefinition)
     {
@@ -178,14 +206,14 @@ export class Codec
         return { r, members: r.entry?.members ?? [] };
     }
 
-    /** Convert a received value to JSON. A limit summarizes large arrays */
+    /** Convert a received value to JSON. A limit summarizes large arrays, lists, and arrays of structures */
     toJson(v: unknown, t: TypeDefinition, scope: ServiceDefinition, limit?: ArrayLimit): unknown
     {
         if (t.container && t.container !== "generator")
         {
             if (v === null || v === undefined) return null;
             const { container: _, ...item } = t;
-            if (t.container === "list") return (v as unknown[]).map((x) => this.toJson(x, item, scope, limit));
+            if (t.container === "list") return summarizedItems(v as unknown[], (x) => this.toJson(x, item, scope, limit), limit);
             return Object.fromEntries([...(v as Map<unknown, unknown>)].map(([k, x]) => [String(k), this.toJson(x, item, scope, limit)]));
         }
         if (t.type === "void") return null;
@@ -222,9 +250,9 @@ export class Codec
         if (t.array === "multidimarray")
         {
             const m = v as { dims: ArrayLike<number>; array: unknown[] };
-            return { dims: Array.from(m.dims), array: m.array.map(item) };
+            return { dims: Array.from(m.dims), array: summarizedItems(m.array, item, limit) };
         }
-        if (t.array) return (v as unknown[]).map(item);
+        if (t.array) return summarizedItems(v as unknown[], item, limit);
         return item(v);
     }
 
@@ -267,6 +295,7 @@ export class Codec
     /** Convert JSON from the model to a value to send */
     fromJson(v: unknown, t: TypeDefinition, scope: ServiceDefinition, path = ""): unknown
     {
+        if (this.refs && isRef(v)) return this.refs(v[REF_KEY], t, scope, path, this);
         if (t.container && t.container !== "generator")
         {
             if (v === null || v === undefined) return null;
@@ -335,7 +364,9 @@ export class Codec
     private enumFromJson(v: unknown, path: string, r: { def: ServiceDefinition; qualifiedName: string }): number
     {
         const e = r.def.enums.find((x) => r.qualifiedName.endsWith("." + x.name))!;
-        const raw = typeof v === "object" && v !== null ? ((v as { name?: unknown; value?: unknown }).name ?? (v as { value?: unknown }).value) : v;
+        let raw = typeof v === "object" && v !== null ? ((v as { name?: unknown; value?: unknown }).name ?? (v as { value?: unknown }).value) : v;
+        // Models sometimes send a name as a JSON string inside the string, such as "\"halt\"". No enum name has quotes
+        if (typeof raw === "string" && /^"[A-Za-z0-9_]+"$/.test(raw)) raw = raw.slice(1, -1);
         if (typeof raw === "number" && Number.isInteger(raw)) return raw;
         if (typeof raw === "string")
         {
