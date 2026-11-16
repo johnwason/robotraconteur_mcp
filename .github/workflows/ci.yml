@@ -50,8 +50,8 @@ jobs:
       # The same packages as the Dockerfile and the image it is built on. Core's test services import pytest
       run: >-
         python -m pip install "robotraconteur==${RR_CORE_VERSION#v}" numpy pytest
-        "robotraconteur-abstract-robot==0.2.3" "robotraconteurcompanion==0.4.0"
-        "general-robotics-toolbox==0.7.3" "reynard-the-robot==0.3.1" scipy pyyaml
+        "robotraconteur-abstract-robot==0.2.4" "robotraconteurcompanion==0.4.0"
+        "general-robotics-toolbox==0.7.3" "reynard-the-robot==0.4.0" scipy pyyaml
     - name: Install Node.js packages
       run: npm ci
     - name: Test

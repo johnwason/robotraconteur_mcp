@@ -138,7 +138,6 @@ class InstrumentedReynard(Reynard):
         super().drive_arm(q1, q2, q3, timeout, wait)
 
     def stop(self):
-        # Reynard 0.3.1 has no stop; the version with it is logged too
         self._log.add("stop")
         super().stop()
 

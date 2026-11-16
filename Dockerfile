@@ -5,8 +5,8 @@
 FROM localhost/rr-ts-dev-cpp
 
 RUN /opt/venv/bin/pip install --no-cache-dir \
-        "robotraconteur-abstract-robot==0.2.3" "robotraconteurcompanion==0.4.0" \
-        "general-robotics-toolbox==0.7.3" "reynard-the-robot==0.3.1" scipy pyyaml
+        "robotraconteur-abstract-robot==0.2.4" "robotraconteurcompanion==0.4.0" \
+        "general-robotics-toolbox==0.7.3" "reynard-the-robot==0.4.0" scipy pyyaml
 
 WORKDIR /work/robotraconteur_mcp
 COPY package.json package-lock.json ./
